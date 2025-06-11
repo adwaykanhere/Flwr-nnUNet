@@ -114,7 +114,7 @@ def client_fn(context: Context):
     """
     client_id = context.node_config.get("partition-id", 0)
 
-    task_name = os.environ.get("TASK_NAME", "Dataset005_Prostate")
+    task_name = os.environ.get("TASK_NAME", "Dataset009_Spleen")
     # Build your paths accordingly:
     plans_path = f"/Users/akanhere/Documents/nnUNet/nnUNet_preprocessed/{task_name}/nnUNetPlans.json"
     dataset_json = f"/Users/akanhere/Documents/nnUNet/nnUNet_preprocessed/{task_name}/dataset.json"
