@@ -23,11 +23,12 @@ Flower-nnUNet for distributed training of 3D Medical Image Segmentation.
    ```bash
    # Required by nnU-Net to locate the processed data
    export nnUNet_preprocessed=/path/to/nnUNet_preprocessed
-   export nnUNet_results=/tmp/nnunet_results
-   export nnUNet_raw=/tmp/nnunet_raw  # unused but required by nnU-Net
-   export OUTPUT_ROOT=/tmp/nnunet_output
-   export NUM_CLIENTS=2
-   export NUM_ROUNDS=5
+    export nnUNet_results=/tmp/nnunet_results
+    export nnUNet_raw=/tmp/nnunet_raw  # unused but required by nnU-Net
+    export OUTPUT_ROOT=/tmp/nnunet_output
+    export NNUNET_DEVICE=cpu   # set to 'cuda' if you have a GPU
+    export NUM_CLIENTS=2
+    export NUM_ROUNDS=5
    ```
 
    Then run `flower-supernode` with `server_app.py:app` and the desired number
