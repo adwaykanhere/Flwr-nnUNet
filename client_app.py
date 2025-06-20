@@ -42,6 +42,8 @@ class NnUNet3DFullresClient(NumPyClient):
             os.path.dirname(dataset_json),
             "dataset_fingerprint.json",
         )
+        self.dataset_json_path = dataset_json
+        self.num_training_cases = self._count_training_cases()
         self.local_fingerprint = self._load_local_fingerprint()
 
     def _load_local_fingerprint(self) -> dict:
@@ -56,6 +58,16 @@ class NnUNet3DFullresClient(NumPyClient):
                 f"[Client {self.client_id}] Fingerprint file not found at {self.dataset_fingerprint_path}"
             )
         return {}
+
+    def _count_training_cases(self) -> int:
+        """Return number of training cases listed in dataset.json."""
+        try:
+            with open(self.dataset_json_path, "r") as f:
+                data = json.load(f)
+            return len(data.get("training", []))
+        except Exception as exc:
+            print(f"[Client {self.client_id}] Could not parse dataset.json: {exc}")
+            return 1
 
     def get_parameters(self, config) -> NDArrays:
         """
@@ -102,8 +114,8 @@ class NnUNet3DFullresClient(NumPyClient):
             "loss": final_loss,
             "fingerprint": local_fp
         }
-        # Put number of local training samples (estimated)
-        num_examples = 100
+        # Use number of local training samples to weight aggregation
+        num_examples = self.num_training_cases
         return FitRes(parameters=updated_params, num_examples=num_examples, metrics=metrics)
 
     def evaluate(self, parameters: NDArrays, config) -> EvaluateRes:
@@ -124,7 +136,7 @@ class NnUNet3DFullresClient(NumPyClient):
         val_loss = 0.5  # or run actual inference
         return EvaluateRes(
             loss=val_loss,
-            num_examples=50,
+            num_examples=self.num_training_cases,
             metrics={"val_loss": val_loss},
         )
 
@@ -137,7 +149,7 @@ def client_fn(context: Context):
     client_id = context.node_config.get("partition-id", 0)
 
     task_name = os.environ.get("TASK_NAME", "Dataset009_Spleen")
-    preproc_root = os.environ.get("PREPROCESSED_ROOT", "/workspace/nnUNet_preprocessed")
+    preproc_root = os.environ.get("nnUNet_preprocessed", "/workspace/nnUNet_preprocessed")
     plans_path = os.path.join(preproc_root, task_name, "nnUNetPlans.json")
     dataset_json = os.path.join(preproc_root, task_name, "dataset.json")
     dataset_fp = os.path.join(preproc_root, task_name, "dataset_fingerprint.json")

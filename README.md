@@ -21,8 +21,8 @@ Flower-nnUNet for distributed training of 3D Medical Image Segmentation.
 3. Set environment variables and start the Flower server and clients:
 
    ```bash
-   export PREPROCESSED_ROOT=/path/to/nnUNet_preprocessed
-   export nnUNet_preprocessed=$PREPROCESSED_ROOT
+   # Required by nnU-Net to locate the processed data
+   export nnUNet_preprocessed=/path/to/nnUNet_preprocessed
    export nnUNet_results=/tmp/nnunet_results
    export nnUNet_raw=/tmp/nnunet_raw  # unused but required by nnU-Net
    export OUTPUT_ROOT=/tmp/nnunet_output
