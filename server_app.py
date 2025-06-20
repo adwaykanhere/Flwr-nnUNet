@@ -7,7 +7,7 @@ from flwr.server import ServerApp, ServerAppComponents, ServerConfig
 from flwr.server.strategy import FedAvg
 from flwr.server.client_proxy import ClientProxy
 
-from flowernnunet.task import merge_local_fingerprints
+from flowernnunet.task import merge_dataset_fingerprints
 
 
 class KaapanaStyleStrategy(FedAvg):
@@ -42,7 +42,7 @@ class KaapanaStyleStrategy(FedAvg):
         if rnd == 2 and self.fingerprints_collected:
             # Merge them into a global fingerprint once all are received
             if len(self.fingerprints_collected) >= self.expected_num_clients:
-                self.global_fingerprint = merge_local_fingerprints(
+                self.global_fingerprint = merge_dataset_fingerprints(
                     self.fingerprints_collected
                 )
                 print("[Server] Merged fingerprint =>", self.global_fingerprint)

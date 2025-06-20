@@ -139,3 +139,43 @@ def merge_local_fingerprints(local_fps: list[dict]) -> dict:
     if total_n == 0:
         return {"mean": 0.0}
     return {"mean": sum_mean / total_n}
+
+
+def merge_dataset_fingerprints(local_fps: list[dict]) -> dict:
+    """Merge nnU-Net dataset_fingerprint.json files from several clients."""
+    if not local_fps:
+        return {}
+
+    merged: dict[str, any] = {
+        "shapes_after_crop": [],
+        "spacings": [],
+    }
+    intensity_props: dict[str, dict[str, list[float]]] = {}
+
+    for fp in local_fps:
+        merged["shapes_after_crop"].extend(fp.get("shapes_after_crop", []))
+        merged["spacings"].extend(fp.get("spacings", []))
+
+        for mod, props in fp.get("foreground_intensity_properties_per_channel", {}).items():
+            if mod not in intensity_props:
+                intensity_props[mod] = {
+                    "mean": [],
+                    "std": [],
+                    "min": [],
+                    "max": [],
+                    "median": [],
+                    "percentile_00_5": [],
+                    "percentile_99_5": [],
+                }
+            for k in intensity_props[mod].keys():
+                if k in props:
+                    intensity_props[mod][k].append(props[k])
+
+    if intensity_props:
+        merged["foreground_intensity_properties_per_channel"] = {}
+        for mod, vals in intensity_props.items():
+            merged["foreground_intensity_properties_per_channel"][mod] = {
+                k: float(np.mean(v)) if len(v) > 0 else 0.0 for k, v in vals.items()
+            }
+
+    return merged
