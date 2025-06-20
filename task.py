@@ -6,8 +6,8 @@ import numpy as np
 import json
 
 # nnU-Net v2: Update path if needed
-# from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
-from flowernnunet.nnUNet.nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
+# Prefer the installed nnunetv2 package
+from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 
 
 class FedNnUNetTrainer(nnUNetTrainer):
@@ -55,22 +55,13 @@ class FedNnUNetTrainer(nnUNetTrainer):
             self.was_initialized = True
 
     def run_training_round(self, num_local_epochs: int):
-        """
-        Train for `num_local_epochs` epochs, continuing from where we left off,
-        until reaching `max_num_epochs`.
-        """
+        """Run the official nnU-Net training loop for a few epochs."""
         if not self.was_initialized:
-            # This is where nnU-Net v2 automatically sets up data loaders (dl_tr, dl_val)
-            # by parsing your dataset.json and the "3d_fullres" plan, etc.
             self.initialize()
 
-        for _ in range(num_local_epochs):
-            if self.current_epoch >= self.max_num_epochs:
-                print(f"[FedNnUNetTrainer] Reached max epochs={self.max_num_epochs}. Stopping.")
-                break
-            train_loss = self.run_one_epoch()
-            self.all_train_losses.append(train_loss)
-            self.current_epoch += 1
+        target_epoch = min(self.current_epoch + num_local_epochs, self.max_num_epochs)
+        self.num_epochs = target_epoch
+        self.run_training()
 
     def run_one_epoch(self) -> float:
         """Train exactly one epoch over self.dl_tr, returning average training loss."""

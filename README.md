@@ -22,6 +22,9 @@ Flower-nnUNet for distributed training of 3D Medical Image Segmentation.
 
    ```bash
    export PREPROCESSED_ROOT=/path/to/nnUNet_preprocessed
+   export nnUNet_preprocessed=$PREPROCESSED_ROOT
+   export nnUNet_results=/tmp/nnunet_results
+   export nnUNet_raw=/tmp/nnunet_raw  # unused but required by nnU-Net
    export OUTPUT_ROOT=/tmp/nnunet_output
    export NUM_CLIENTS=2
    export NUM_ROUNDS=5
