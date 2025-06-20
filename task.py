@@ -23,7 +23,7 @@ class FedNnUNetTrainer(nnUNetTrainer):
         fold: int,
         dataset_json: str,    # Path to dataset.json describing local training data
         output_folder: str,
-        device: torch.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
+        device: torch.device | str | None = None,
         max_num_epochs: int = 50,
     ):
         with open(plans, "r") as f:
@@ -31,12 +31,15 @@ class FedNnUNetTrainer(nnUNetTrainer):
         with open(dataset_json, "r") as f:
             dataset_dict = json.load(f)
 
+        if device is None:
+            device = torch.device(os.environ.get("NNUNET_DEVICE", "cpu"))
+
         super().__init__(
             plans=plans_dict,           # <--- pass dict, not "plans_path"
             configuration=configuration,
             fold=fold,
             dataset_json=dataset_dict,       # <--- pass dict, not "dataset_json" path
-            device=device, # if your trainer expects "device" by name
+            device=device,  # if your trainer expects "device" by name
         )
         
         self.device = device

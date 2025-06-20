@@ -34,6 +34,7 @@ class NnUNet3DFullresClient(NumPyClient):
             fold=0,
             dataset_json=dataset_json,
             output_folder=output_folder,
+            device=os.environ.get("NNUNET_DEVICE", "cpu"),
             max_num_epochs=max_total_epochs,
         )
         self.local_epochs_per_round = local_epochs_per_round
