@@ -6,8 +6,8 @@ import numpy as np
 import json
 
 # nnU-Net v2: Update path if needed
-# from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
-from flowernnunet.nnUNet.nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
+# Prefer the installed nnunetv2 package
+from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 
 
 class FedNnUNetTrainer(nnUNetTrainer):
@@ -55,22 +55,13 @@ class FedNnUNetTrainer(nnUNetTrainer):
             self.was_initialized = True
 
     def run_training_round(self, num_local_epochs: int):
-        """
-        Train for `num_local_epochs` epochs, continuing from where we left off,
-        until reaching `max_num_epochs`.
-        """
+        """Run the official nnU-Net training loop for a few epochs."""
         if not self.was_initialized:
-            # This is where nnU-Net v2 automatically sets up data loaders (dl_tr, dl_val)
-            # by parsing your dataset.json and the "3d_fullres" plan, etc.
             self.initialize()
 
-        for _ in range(num_local_epochs):
-            if self.current_epoch >= self.max_num_epochs:
-                print(f"[FedNnUNetTrainer] Reached max epochs={self.max_num_epochs}. Stopping.")
-                break
-            train_loss = self.run_one_epoch()
-            self.all_train_losses.append(train_loss)
-            self.current_epoch += 1
+        target_epoch = min(self.current_epoch + num_local_epochs, self.max_num_epochs)
+        self.num_epochs = target_epoch
+        self.run_training()
 
     def run_one_epoch(self) -> float:
         """Train exactly one epoch over self.dl_tr, returning average training loss."""
@@ -148,3 +139,43 @@ def merge_local_fingerprints(local_fps: list[dict]) -> dict:
     if total_n == 0:
         return {"mean": 0.0}
     return {"mean": sum_mean / total_n}
+
+
+def merge_dataset_fingerprints(local_fps: list[dict]) -> dict:
+    """Merge nnU-Net dataset_fingerprint.json files from several clients."""
+    if not local_fps:
+        return {}
+
+    merged: dict[str, any] = {
+        "shapes_after_crop": [],
+        "spacings": [],
+    }
+    intensity_props: dict[str, dict[str, list[float]]] = {}
+
+    for fp in local_fps:
+        merged["shapes_after_crop"].extend(fp.get("shapes_after_crop", []))
+        merged["spacings"].extend(fp.get("spacings", []))
+
+        for mod, props in fp.get("foreground_intensity_properties_per_channel", {}).items():
+            if mod not in intensity_props:
+                intensity_props[mod] = {
+                    "mean": [],
+                    "std": [],
+                    "min": [],
+                    "max": [],
+                    "median": [],
+                    "percentile_00_5": [],
+                    "percentile_99_5": [],
+                }
+            for k in intensity_props[mod].keys():
+                if k in props:
+                    intensity_props[mod][k].append(props[k])
+
+    if intensity_props:
+        merged["foreground_intensity_properties_per_channel"] = {}
+        for mod, vals in intensity_props.items():
+            merged["foreground_intensity_properties_per_channel"][mod] = {
+                k: float(np.mean(v)) if len(v) > 0 else 0.0 for k, v in vals.items()
+            }
+
+    return merged

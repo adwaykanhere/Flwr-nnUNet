@@ -1,6 +1,7 @@
 # client_app.py
 
 import os
+import json
 import flwr as fl
 from flwr.client import ClientApp, NumPyClient
 from flwr.common import Context, FitRes, EvaluateRes, NDArrays
@@ -21,6 +22,7 @@ class NnUNet3DFullresClient(NumPyClient):
         dataset_json: str,
         configuration: str,
         output_folder: str,
+        dataset_fingerprint: str | None = None,
         max_total_epochs: int = 50,
         local_epochs_per_round: int = 2,
     ):
@@ -36,6 +38,36 @@ class NnUNet3DFullresClient(NumPyClient):
         )
         self.local_epochs_per_round = local_epochs_per_round
         self.param_keys = None
+        self.dataset_fingerprint_path = dataset_fingerprint or os.path.join(
+            os.path.dirname(dataset_json),
+            "dataset_fingerprint.json",
+        )
+        self.dataset_json_path = dataset_json
+        self.num_training_cases = self._count_training_cases()
+        self.local_fingerprint = self._load_local_fingerprint()
+
+    def _load_local_fingerprint(self) -> dict:
+        if self.dataset_fingerprint_path and os.path.exists(self.dataset_fingerprint_path):
+            try:
+                with open(self.dataset_fingerprint_path, "r") as f:
+                    return json.load(f)
+            except Exception as exc:
+                print(f"[Client {self.client_id}] Could not load fingerprint: {exc}")
+        else:
+            print(
+                f"[Client {self.client_id}] Fingerprint file not found at {self.dataset_fingerprint_path}"
+            )
+        return {}
+
+    def _count_training_cases(self) -> int:
+        """Return number of training cases listed in dataset.json."""
+        try:
+            with open(self.dataset_json_path, "r") as f:
+                data = json.load(f)
+            return len(data.get("training", []))
+        except Exception as exc:
+            print(f"[Client {self.client_id}] Could not parse dataset.json: {exc}")
+            return 1
 
     def get_parameters(self, config) -> NDArrays:
         """
@@ -71,17 +103,19 @@ class NnUNet3DFullresClient(NumPyClient):
         updated_params = [updated_dict[k] for k in self.param_keys]
 
         # Example local metrics
-        final_loss = self.trainer.all_train_losses[-1] if self.trainer.all_train_losses else 0.0
-        # Example local “fingerprint” (just dummy data)
-        local_fp = {"mean": 40.0 + self.client_id, "std": 7.5, "n": 5000}
+        final_loss = (
+            self.trainer.all_train_losses[-1] if self.trainer.all_train_losses else 0.0
+        )
+
+        local_fp = self.local_fingerprint
 
         metrics = {
             "client_id": self.client_id,
             "loss": final_loss,
             "fingerprint": local_fp
         }
-        # Put number of local training samples (estimated)
-        num_examples = 100
+        # Use number of local training samples to weight aggregation
+        num_examples = self.num_training_cases
         return FitRes(parameters=updated_params, num_examples=num_examples, metrics=metrics)
 
     def evaluate(self, parameters: NDArrays, config) -> EvaluateRes:
@@ -102,7 +136,7 @@ class NnUNet3DFullresClient(NumPyClient):
         val_loss = 0.5  # or run actual inference
         return EvaluateRes(
             loss=val_loss,
-            num_examples=50,
+            num_examples=self.num_training_cases,
             metrics={"val_loss": val_loss},
         )
 
@@ -115,11 +149,13 @@ def client_fn(context: Context):
     client_id = context.node_config.get("partition-id", 0)
 
     task_name = os.environ.get("TASK_NAME", "Dataset009_Spleen")
-    # Build your paths accordingly:
-    plans_path = f"/Users/akanhere/Documents/nnUNet/nnUNet_preprocessed/{task_name}/nnUNetPlans.json"
-    dataset_json = f"/Users/akanhere/Documents/nnUNet/nnUNet_preprocessed/{task_name}/dataset.json"
-    configuration = "3d_fullres"  # or read from env
-    output_folder = f"/Users/akanhere/Documents/nnUNet/output_client_{client_id}"
+    preproc_root = os.environ.get("nnUNet_preprocessed", "/workspace/nnUNet_preprocessed")
+    plans_path = os.path.join(preproc_root, task_name, "nnUNetPlans.json")
+    dataset_json = os.path.join(preproc_root, task_name, "dataset.json")
+    dataset_fp = os.path.join(preproc_root, task_name, "dataset_fingerprint.json")
+    configuration = os.environ.get("NNUNET_CONFIG", "3d_fullres")
+    out_root = os.environ.get("OUTPUT_ROOT", "/workspace/nnunet_output")
+    output_folder = os.path.join(out_root, f"client_{client_id}")
 
     # Create the client
     return NnUNet3DFullresClient(
@@ -128,6 +164,7 @@ def client_fn(context: Context):
         dataset_json=dataset_json,
         configuration=configuration,
         output_folder=output_folder,
+        dataset_fingerprint=dataset_fp,
         max_total_epochs=50,
         local_epochs_per_round=2,
     ).to_client()
