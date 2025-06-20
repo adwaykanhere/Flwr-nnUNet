@@ -32,7 +32,8 @@ class FedNnUNetTrainer(nnUNetTrainer):
             dataset_dict = json.load(f)
 
         if device is None:
-            device = torch.device(os.environ.get("NNUNET_DEVICE", "cpu"))
+            device = os.environ.get("NNUNET_DEVICE", "cpu")
+        device = torch.device(device)
 
         super().__init__(
             plans=plans_dict,           # <--- pass dict, not "plans_path"
