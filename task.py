@@ -76,7 +76,9 @@ class NnUNetDataset:
             return data, seg, properties
             
         except Exception as e:
-            print(f"[Dataset] Error loading {key}: {e}")
+            print(f"[Dataset] Error loading {key} from {data_file}: {e}")
+            import traceback
+            traceback.print_exc()
             raise e  # Don't use dummy data, let the error propagate
 
 
@@ -108,6 +110,9 @@ class FedNnUNetTrainer(nnUNetTrainer):
         self.max_num_epochs = 50  # Default value
         self.current_epoch = 0
         self.all_train_losses = []
+        
+        # Override nnUNet multiprocessing settings to avoid conflicts with Ray
+        self.num_processes = 1  # Disable multiprocessing for data augmentation
 
     @property
     def loss_function(self):
@@ -116,19 +121,34 @@ class FedNnUNetTrainer(nnUNetTrainer):
     
     def initialize(self):
         if not self.was_initialized:
-            # Disable multiprocessing to avoid CUDA crashes in WSL2
+            # Disable multiprocessing to avoid conflicts with Ray/Flower
             import os
             os.environ['OMP_NUM_THREADS'] = '1'
             os.environ['CUDA_VISIBLE_DEVICES'] = ''  # Force no CUDA
             os.environ['MKL_NUM_THREADS'] = '1'      # Disable Intel MKL threading
             os.environ['NUMEXPR_NUM_THREADS'] = '1'  # Disable NumExpr threading
             os.environ['nnUNet_n_proc_DA'] = '1'     # Disable nnUNet data augmentation multiprocessing
+            os.environ['nnUNet_def_n_proc'] = '1'    # Disable default multiprocessing
             
-            super().initialize() # TODO: Need to look into setting 3d_fullres as it might default to 2d
-
-            # If the parent didn't set dataloaders, do it ourselves:
-            if self.dataloader_train is None or self.dataloader_val is None:
-                self.dataloader_train, self.dataloader_val = self.get_dataloaders()
+            super().initialize() # This will create the network, optimizer, loss, etc.
+            
+            # The parent initialize() doesn't create dataloaders, we need to do that manually
+            # We need to call the specific methods that create dataloaders
+            print("[Trainer] Creating dataloaders...")
+            print(f"[Trainer] Preprocessed dataset folder: {self.preprocessed_dataset_folder}")
+            print(f"[Trainer] Configuration: {self.configuration_name}")
+            print(f"[Trainer] Data identifier: {self.configuration_manager.data_identifier}")
+            
+            # Check if the folder exists
+            import os
+            if os.path.exists(self.preprocessed_dataset_folder):
+                files = [f for f in os.listdir(self.preprocessed_dataset_folder) if f.endswith('.npz')]
+                print(f"[Trainer] Found {len(files)} .npz files in preprocessed folder")
+            else:
+                print(f"[Trainer] ERROR: Preprocessed dataset folder does not exist!")
+                
+            self.dataloader_train, self.dataloader_val = self.get_dataloaders()
+            print(f"[Trainer] Dataloaders created - train: {self.dataloader_train is not None}, val: {self.dataloader_val is not None}")
 
             self.was_initialized = True
 
@@ -187,6 +207,10 @@ class FedNnUNetTrainer(nnUNetTrainer):
         dataset_val = NnUNetDataset(val_keys, self.preprocessed_dataset_folder)
         
         return dataset_tr, dataset_val
+        
+    def get_allowed_n_proc_DA(self):
+        """Override to force single-threaded data augmentation to avoid Ray conflicts"""
+        return 1
 
 
     def run_training_round(self, num_local_epochs: int):
