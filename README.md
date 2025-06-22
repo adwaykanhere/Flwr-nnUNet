@@ -201,7 +201,7 @@ The implementation follows a 3-phase federated learning approach:
 
 ## Recent Updates
 
-### v2.0 - Real Data Integration (December 2024)
+### v2.0 - Real Data Integration (June 2025)
 - ✅ **Fixed Pickle Loading Errors**: Resolved multiprocessing issues with dataset classes
 - ✅ **Real Data Support**: Now loads actual nnUNet preprocessed .npz/.pkl files instead of dummy data
 - ✅ **Generic Dataset Support**: Updated codebase to work with any nnUNet dataset, not just prostate
@@ -245,7 +245,7 @@ When extending this implementation:
 This implementation is based on:
 - [nnU-Net v2](https://github.com/MIC-DKFZ/nnUNet) for medical image segmentation
 - [Flower Framework](https://flower.dev/) for federated learning
-- Federated learning concepts from medical AI research
+- [Kaapana](https://kaapana.readthedocs.io/en/latest/intro_kaapana.html) based Federated learning concepts from medical AI research
 
 ## License
 
