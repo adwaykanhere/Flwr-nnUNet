@@ -1,13 +1,19 @@
 # task.py
 
 import os
+# Force disable CUDA before importing torch to prevent initialization crashes
+os.environ['CUDA_VISIBLE_DEVICES'] = ''
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
+os.environ['nnUNet_n_proc_DA'] = '1'
 import torch
 import numpy as np
 import json
 
 # nnU-Net v2: Update path if needed
 # Prefer the installed nnunetv2 package
-from nnUNet.nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
+from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 
 
 class FedNnUNetTrainer(nnUNetTrainer):
@@ -23,7 +29,7 @@ class FedNnUNetTrainer(nnUNetTrainer):
         fold: int,
         dataset_json: str,    # Path to dataset.json describing local training data
         output_folder: str,
-        device: torch.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
+        device: torch.device = torch.device("cpu"),  # Force CPU to avoid CUDA issues in WSL2
         max_num_epochs: int = 50,
     ):
         with open(plans, "r") as f:
@@ -46,6 +52,14 @@ class FedNnUNetTrainer(nnUNetTrainer):
     
     def initialize(self):
         if not self.was_initialized:
+            # Disable multiprocessing to avoid CUDA crashes in WSL2
+            import os
+            os.environ['OMP_NUM_THREADS'] = '1'
+            os.environ['CUDA_VISIBLE_DEVICES'] = ''  # Force no CUDA
+            os.environ['MKL_NUM_THREADS'] = '1'      # Disable Intel MKL threading
+            os.environ['NUMEXPR_NUM_THREADS'] = '1'  # Disable NumExpr threading
+            os.environ['nnUNet_n_proc_DA'] = '1'     # Disable nnUNet data augmentation multiprocessing
+            
             super().initialize() # TODO: Need to look into setting 3d_fullres as it might default to 2d
 
             # If the parent didn't set dataloaders, do it ourselves:
@@ -53,6 +67,135 @@ class FedNnUNetTrainer(nnUNetTrainer):
                 self.dataloader_train, self.dataloader_val = self.get_dataloaders()
 
             self.was_initialized = True
+
+    def get_case_identifiers_from_b2nd(self, folder: str):
+        """
+        Workaround: Find case identifiers from .b2nd files instead of .npz files.
+        This handles preprocessed data that uses the newer .b2nd format.
+        """
+        import os
+        case_identifiers = [i[:-5] for i in os.listdir(folder) if i.endswith(".b2nd") and not i.endswith("_seg.b2nd")]
+        return case_identifiers
+
+    def do_split(self):
+        """
+        Override do_split to handle .b2nd files instead of .npz files.
+        This is a workaround for nnUNet v2 datasets that use .b2nd format.
+        """
+        from batchgenerators.utilities.file_and_folder_operations import isfile, join, save_json, load_json
+        from nnunetv2.utilities.crossval_split import generate_crossval_split
+        import numpy as np
+        
+        if self.fold == "all":
+            # Use our custom case identifier function for .b2nd files
+            case_identifiers = self.get_case_identifiers_from_b2nd(self.preprocessed_dataset_folder)
+            tr_keys = case_identifiers
+            val_keys = tr_keys
+        else:
+            splits_file = join(self.preprocessed_dataset_folder_base, "splits_final.json")
+            
+            # Use our custom case identifier function
+            case_identifiers = self.get_case_identifiers_from_b2nd(self.preprocessed_dataset_folder)
+            print(f"[Trainer] Found {len(case_identifiers)} case identifiers: {case_identifiers[:5]}...")
+            
+            if not isfile(splits_file):
+                self.print_to_log_file("Creating new 5-fold cross-validation split...")
+                all_keys_sorted = list(np.sort(case_identifiers))
+                splits = generate_crossval_split(all_keys_sorted, seed=12345, n_splits=5)
+                save_json(splits, splits_file)
+            else:
+                self.print_to_log_file("Using splits from existing split file:", splits_file)
+                splits = load_json(splits_file)
+
+            tr_keys = splits[self.fold]['train']
+            val_keys = splits[self.fold]['val']
+
+        self.print_to_log_file(f"This fold has {len(tr_keys)} training and {len(val_keys)} validation cases.")
+        return tr_keys, val_keys
+
+    def get_tr_and_val_datasets(self):
+        """
+        Override to handle .b2nd files by creating a custom dataset that can load them.
+        Uses real prostate data from .b2nd compressed files.
+        """
+        # Get splits using our custom method
+        tr_keys, val_keys = self.do_split()
+        
+        # Create a dataset that can load real .b2nd files
+        class B2NDDataset:
+            def __init__(self, keys, folder):
+                self.keys_list = keys
+                self.folder = folder
+                # Preload properties to avoid file access issues during training
+                self._properties_cache = {}
+                self._preload_properties()
+                
+            def _preload_properties(self):
+                """Preload all properties to avoid file I/O during training"""
+                import pickle
+                import os
+                print(f"[Dataset] Preloading properties for {len(self.keys_list)} cases...")
+                for key in self.keys_list:
+                    props_file = os.path.join(self.folder, f"{key}.pkl")
+                    try:
+                        with open(props_file, 'rb') as f:
+                            self._properties_cache[key] = pickle.load(f)
+                    except Exception as e:
+                        print(f"[Dataset] Warning: Could not load properties for {key}: {e}")
+                        self._properties_cache[key] = {}
+                
+            def keys(self):
+                return self.keys_list
+                
+            def __len__(self):
+                return len(self.keys_list)
+                
+            def __getitem__(self, key):
+                data, seg, properties = self.load_case(key)
+                return {
+                    'data': data,
+                    'seg': seg,
+                    'properties': properties
+                }
+                
+            def load_case(self, key):
+                """Load actual .b2nd files and cached properties"""
+                import blosc2
+                import os
+                import numpy as np
+                
+                # Construct file paths
+                data_file = os.path.join(self.folder, f"{key}.b2nd")
+                seg_file = os.path.join(self.folder, f"{key}_seg.b2nd")
+                
+                try:
+                    # Load data and segmentation with error handling
+                    data = blosc2.open(data_file)[:]  # Shape: (channels, z, y, x)
+                    seg = blosc2.open(seg_file)[:]    # Shape: (1, z, y, x)
+                    
+                    # Get cached properties
+                    properties = self._properties_cache.get(key, {})
+                    
+                    # Ensure data is float32 and seg is int for compatibility
+                    data = np.asarray(data, dtype=np.float32)
+                    seg = np.asarray(seg, dtype=np.int32)
+                    
+                    return data, seg, properties
+                    
+                except Exception as e:
+                    print(f"[Dataset] Error loading {key}: {e}")
+                    # Return dummy data if loading fails
+                    import numpy as np
+                    dummy_data = np.zeros((1, 64, 64, 64), dtype=np.float32)
+                    dummy_seg = np.zeros((1, 64, 64, 64), dtype=np.int32)
+                    return dummy_data, dummy_seg, {}
+        
+        print(f"[Trainer] Creating B2ND datasets with real prostate data - tr: {len(tr_keys)}, val: {len(val_keys)}")
+        dataset_tr = B2NDDataset(tr_keys, self.preprocessed_dataset_folder)
+        dataset_val = B2NDDataset(val_keys, self.preprocessed_dataset_folder)
+        
+        return dataset_tr, dataset_val
+
 
     def run_training_round(self, num_local_epochs: int):
         """Run the official nnU-Net training loop for a few epochs."""

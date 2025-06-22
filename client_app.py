@@ -219,13 +219,13 @@ def client_fn(context: Context):
     """
     client_id = context.node_config.get("partition-id", 0)
 
-    task_name = os.environ.get("TASK_NAME", "Dataset009_Spleen") #Update here with the relevant dataset json
-    preproc_root = os.environ.get("nnUNet_preprocessed", "/workspace/nnUNet_preprocessed")
+    task_name = os.environ.get("TASK_NAME", "Dataset005_Prostate") #Update here with the relevant dataset json
+    preproc_root = os.environ.get("nnUNet_preprocessed", "/mnt/c/Users/adway/Documents/nnUNet_preprocessed")
     plans_path = os.path.join(preproc_root, task_name, "nnUNetPlans.json")
     dataset_json = os.path.join(preproc_root, task_name, "dataset.json")
     dataset_fp = os.path.join(preproc_root, task_name, "dataset_fingerprint.json")
     configuration = os.environ.get("NNUNET_CONFIG", "3d_fullres")
-    out_root = os.environ.get("OUTPUT_ROOT", "/workspace/nnunet_output")
+    out_root = os.environ.get("OUTPUT_ROOT", "/mnt/c/Users/adway/Documents/nnunet_output")
     output_folder = os.path.join(out_root, f"client_{client_id}")
 
     # Create the client
