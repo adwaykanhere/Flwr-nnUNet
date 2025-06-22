@@ -234,18 +234,36 @@ class FedNnUNetTrainer(nnUNetTrainer):
 
     def run_one_epoch(self) -> float:
         """Train exactly one epoch over self.dl_tr, returning average training loss."""
-        self.network.train()
-        losses = []
-        # For testing: limit to just a few batches to verify functionality
-        batch_count = 0
-        max_batches = 3  # Process only 3 batches for faster testing
-        for batch_data in self.dataloader_train:
-            batch_loss = self.run_iteration(batch_data)
-            losses.append(batch_loss)
-            batch_count += 1
-            if batch_count >= max_batches:
-                break
-        return float(np.mean(losses)) if len(losses) > 0 else 0.0
+        try:
+            print(f"[Trainer] Setting network to training mode...")
+            self.network.train()
+            losses = []
+            
+            # For testing: limit to just a few batches to verify functionality
+            batch_count = 0
+            max_batches = 3  # Process only 3 batches for faster testing
+            
+            print(f"[Trainer] Starting to iterate over training dataloader (max {max_batches} batches)...")
+            
+            for batch_data in self.dataloader_train:
+                print(f"[Trainer] Processing batch {batch_count + 1}/{max_batches}...")
+                batch_loss = self.run_iteration(batch_data)
+                losses.append(batch_loss)
+                batch_count += 1
+                print(f"[Trainer] Batch {batch_count} loss: {batch_loss:.4f}")
+                
+                if batch_count >= max_batches:
+                    break
+                    
+            avg_loss = float(np.mean(losses)) if len(losses) > 0 else 0.0
+            print(f"[Trainer] Epoch completed. Average loss: {avg_loss:.4f}")
+            return avg_loss
+            
+        except Exception as e:
+            print(f"[Trainer] ERROR in run_one_epoch: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
 
     def run_iteration(self, data_dict) -> float:
         data = data_dict["data"]
