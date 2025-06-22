@@ -7,7 +7,7 @@ import json
 
 # nnU-Net v2: Update path if needed
 # Prefer the installed nnunetv2 package
-from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
+from nnUNet.nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 
 
 class FedNnUNetTrainer(nnUNetTrainer):
@@ -23,7 +23,7 @@ class FedNnUNetTrainer(nnUNetTrainer):
         fold: int,
         dataset_json: str,    # Path to dataset.json describing local training data
         output_folder: str,
-        device: torch.device | str | None = None,
+        device: torch.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
         max_num_epochs: int = 50,
     ):
         with open(plans, "r") as f:
@@ -31,15 +31,12 @@ class FedNnUNetTrainer(nnUNetTrainer):
         with open(dataset_json, "r") as f:
             dataset_dict = json.load(f)
 
-        if device is None:
-            device = torch.device(os.environ.get("NNUNET_DEVICE", "cpu"))
-
         super().__init__(
             plans=plans_dict,           # <--- pass dict, not "plans_path"
             configuration=configuration,
             fold=fold,
             dataset_json=dataset_dict,       # <--- pass dict, not "dataset_json" path
-            device=device,  # if your trainer expects "device" by name
+            device=device, # if your trainer expects "device" by name
         )
         
         self.device = device
@@ -62,9 +59,28 @@ class FedNnUNetTrainer(nnUNetTrainer):
         if not self.was_initialized:
             self.initialize()
 
+        start_epoch = self.current_epoch
         target_epoch = min(self.current_epoch + num_local_epochs, self.max_num_epochs)
-        self.num_epochs = target_epoch
-        self.run_training()
+        
+        print(f"[Trainer] Running training from epoch {start_epoch} to {target_epoch}")
+        
+        # Train for the specified number of epochs
+        for epoch in range(start_epoch, target_epoch):
+            epoch_loss = self.run_one_epoch()
+            self.all_train_losses.append(epoch_loss)
+            self.current_epoch = epoch + 1
+            
+            print(f"[Trainer] Epoch {self.current_epoch}: loss={epoch_loss:.4f}")
+            
+            # Save checkpoint periodically
+            if (self.current_epoch % 10) == 0:
+                self._save_checkpoint()
+                
+        print(f"[Trainer] Completed {num_local_epochs} epochs, total epochs: {self.current_epoch}")
+
+    def _save_checkpoint(self):
+        """Save model checkpoint (optional - can be implemented for recovery)."""
+        pass
 
     def run_one_epoch(self) -> float:
         """Train exactly one epoch over self.dl_tr, returning average training loss."""
@@ -145,40 +161,84 @@ def merge_local_fingerprints(local_fps: list[dict]) -> dict:
 
 
 def merge_dataset_fingerprints(local_fps: list[dict]) -> dict:
-    """Merge nnU-Net dataset_fingerprint.json files from several clients."""
+    """
+    Merge nnU-Net dataset_fingerprint.json files from several clients.
+    Implements kaapana-style fingerprint aggregation using estimate mode.
+    """
     if not local_fps:
         return {}
 
+    print(f"[Fingerprint] Merging {len(local_fps)} local fingerprints")
+    
+    # Initialize merged fingerprint structure
     merged: dict[str, any] = {
         "shapes_after_crop": [],
         "spacings": [],
+        "foreground_intensity_properties_per_channel": {}
     }
-    intensity_props: dict[str, dict[str, list[float]]] = {}
-
+    
+    # Collect all shapes and spacings
+    all_shapes = []
+    all_spacings = []
+    
     for fp in local_fps:
-        merged["shapes_after_crop"].extend(fp.get("shapes_after_crop", []))
-        merged["spacings"].extend(fp.get("spacings", []))
-
-        for mod, props in fp.get("foreground_intensity_properties_per_channel", {}).items():
-            if mod not in intensity_props:
-                intensity_props[mod] = {
+        shapes = fp.get("shapes_after_crop", [])
+        spacings = fp.get("spacings", [])
+        all_shapes.extend(shapes)
+        all_spacings.extend(spacings)
+    
+    merged["shapes_after_crop"] = all_shapes
+    merged["spacings"] = all_spacings
+    
+    # Aggregate intensity properties per modality using weighted averaging
+    intensity_props: dict[str, dict[str, list[tuple[float, int]]]] = {}
+    
+    for fp in local_fps:
+        n_samples = len(fp.get("spacings", []))  # Number of samples for this client
+        
+        for mod_key, props in fp.get("foreground_intensity_properties_per_channel", {}).items():
+            if mod_key not in intensity_props:
+                intensity_props[mod_key] = {
                     "mean": [],
                     "std": [],
-                    "min": [],
+                    "min": [], 
                     "max": [],
                     "median": [],
                     "percentile_00_5": [],
                     "percentile_99_5": [],
                 }
-            for k in intensity_props[mod].keys():
-                if k in props:
-                    intensity_props[mod][k].append(props[k])
+            
+            # Store value and weight (number of samples) for weighted averaging
+            for stat_key in intensity_props[mod_key].keys():
+                if stat_key in props:
+                    intensity_props[mod_key][stat_key].append((props[stat_key], n_samples))
 
+    # Compute weighted averages for intensity properties
     if intensity_props:
-        merged["foreground_intensity_properties_per_channel"] = {}
-        for mod, vals in intensity_props.items():
-            merged["foreground_intensity_properties_per_channel"][mod] = {
-                k: float(np.mean(v)) if len(v) > 0 else 0.0 for k, v in vals.items()
-            }
+        for mod_key, stats in intensity_props.items():
+            merged["foreground_intensity_properties_per_channel"][mod_key] = {}
+            
+            for stat_key, values_weights in stats.items():
+                if values_weights:
+                    if stat_key in ["min"]:
+                        # For min, take the global minimum
+                        merged_value = min(v for v, w in values_weights)
+                    elif stat_key in ["max"]:
+                        # For max, take the global maximum
+                        merged_value = max(v for v, w in values_weights)
+                    else:
+                        # For mean, std, median, percentiles: use weighted average
+                        total_weight = sum(w for v, w in values_weights)
+                        if total_weight > 0:
+                            merged_value = sum(v * w for v, w in values_weights) / total_weight
+                        else:
+                            merged_value = 0.0
+                    
+                    merged["foreground_intensity_properties_per_channel"][mod_key][stat_key] = float(merged_value)
+                else:
+                    merged["foreground_intensity_properties_per_channel"][mod_key][stat_key] = 0.0
 
+    print(f"[Fingerprint] Merged fingerprint: {len(all_shapes)} shapes, {len(all_spacings)} spacings")
+    print(f"[Fingerprint] Modalities: {list(merged['foreground_intensity_properties_per_channel'].keys())}")
+    
     return merged

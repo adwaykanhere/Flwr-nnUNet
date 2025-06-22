@@ -7,64 +7,138 @@ from flwr.server import ServerApp, ServerAppComponents, ServerConfig
 from flwr.server.strategy import FedAvg
 from flwr.server.client_proxy import ClientProxy
 
-from flowernnunet.task import merge_dataset_fingerprints
+from task import merge_dataset_fingerprints
 
 
 class KaapanaStyleStrategy(FedAvg):
-    """FedAvg strategy that also aggregates dataset fingerprints."""
+    """
+    FedAvg strategy that implements kaapana-style multi-phase federated learning:
+    Round -2: Fingerprint collection (preprocessing)
+    Round -1: Global fingerprint distribution (initialization) 
+    Round 0+: Regular federated training rounds
+    """
 
     def __init__(self, expected_num_clients: int = 2, **kwargs):
         super().__init__(**kwargs)
         self.expected_num_clients = expected_num_clients
         self.fingerprints_collected: list[dict] = []
         self.global_fingerprint: dict | None = None
+        self.current_phase = "preprocessing"  # preprocessing, initialization, training
+
+    def configure_fit(self, server_round: int, parameters, client_manager):
+        """Configure the fit round with kaapana-style phase management."""
+        
+        # Determine federated round based on server round
+        if server_round == 1:
+            federated_round = -2  # Preprocessing round
+            self.current_phase = "preprocessing"
+        elif server_round == 2:
+            federated_round = -1  # Initialization round  
+            self.current_phase = "initialization"
+        else:
+            federated_round = server_round - 2  # Training rounds (0, 1, 2, ...)
+            self.current_phase = "training"
+            
+        print(f"[Server] Round {server_round} -> Federated round {federated_round} ({self.current_phase} phase)")
+        
+        config = {
+            "server_round": federated_round,
+            "local_epochs": 2,  # Default local epochs per round
+        }
+        
+        # Add global fingerprint to config during initialization phase
+        if federated_round == -1 and self.global_fingerprint:
+            config["global_fingerprint"] = self.global_fingerprint
+            
+        # Call parent's configure_fit method
+        fit_ins = super().configure_fit(server_round, parameters, client_manager)
+        
+        # Update config in fit instructions
+        updated_fit_ins = []
+        for client_proxy, fit_ins_item in fit_ins:
+            fit_ins_item.config.update(config)
+            updated_fit_ins.append((client_proxy, fit_ins_item))
+            
+        return updated_fit_ins
 
     def aggregate_fit(
         self,
-        rnd: int,
+        server_round: int,
         results: list[tuple[ClientProxy, FitRes]],
         failures: list[BaseException],
     ):
-        print(f"[Server] Round {rnd} results: {len(results)} successes, {len(failures)} failures.")
+        print(f"[Server] Round {server_round} results: {len(results)} successes, {len(failures)} failures.")
+        
+        # Determine federated round
+        if server_round == 1:
+            federated_round = -2  # Preprocessing round
+        elif server_round == 2:
+            federated_round = -1  # Initialization round
+        else:
+            federated_round = server_round - 2  # Training rounds
 
-        if rnd == 1:
-            # Gather local fingerprint from each client
+        # Handle preprocessing round - collect fingerprints
+        if federated_round == -2:
+            print("[Server] Processing fingerprint collection round")
             for _, fitres in results:
                 fp = fitres.metrics.get("fingerprint", None)
-                if fp:
+                preprocessing_complete = fitres.metrics.get("preprocessing_complete", False)
+                if fp and preprocessing_complete:
                     self.fingerprints_collected.append(fp)
-            print(
-                f"[Server] Collected {len(self.fingerprints_collected)}/"
-                f"{self.expected_num_clients} fingerprints in round 1."
-            )
-            return super().aggregate_fit(rnd, results, failures)
-
-        if rnd == 2 and self.fingerprints_collected:
-            # Merge them into a global fingerprint once all are received
+                    
+            print(f"[Server] Collected {len(self.fingerprints_collected)}/{self.expected_num_clients} fingerprints")
+            
+            # Merge fingerprints if we have enough
             if len(self.fingerprints_collected) >= self.expected_num_clients:
-                self.global_fingerprint = merge_dataset_fingerprints(
-                    self.fingerprints_collected
-                )
-                print("[Server] Merged fingerprint =>", self.global_fingerprint)
+                self.global_fingerprint = merge_dataset_fingerprints(self.fingerprints_collected)
+                print(f"[Server] Merged global fingerprint: {list(self.global_fingerprint.keys())}")
             else:
-                print(
-                    f"[Server] Only {len(self.fingerprints_collected)} fingerprints received; skipping merge"
-                )
-            return super().aggregate_fit(rnd, results, failures)
+                print(f"[Server] Waiting for more fingerprints ({len(self.fingerprints_collected)}/{self.expected_num_clients})")
+                
+            return super().aggregate_fit(server_round, results, failures)
 
-        return super().aggregate_fit(rnd, results, failures)
+        # Handle initialization round - distribute global fingerprint and initial model
+        elif federated_round == -1:
+            print("[Server] Processing initialization round")
+            for _, fitres in results:
+                init_complete = fitres.metrics.get("initialization_complete", False)
+                if init_complete:
+                    print(f"[Server] Client initialized successfully")
+                    
+            return super().aggregate_fit(server_round, results, failures)
+
+        # Handle regular training rounds
+        else:
+            print(f"[Server] Processing training round {federated_round}")
+            for _, fitres in results:
+                client_id = fitres.metrics.get("client_id", "unknown")
+                loss = fitres.metrics.get("loss", 0.0)
+                epochs = fitres.metrics.get("local_epochs_completed", 0)
+                print(f"[Server] Client {client_id}: loss={loss:.4f}, epochs={epochs}")
+                
+            return super().aggregate_fit(server_round, results, failures)
 
 
 def server_fn(context: Context):
     expected_clients = int(os.environ.get("NUM_CLIENTS", 2))
-    num_rounds = int(os.environ.get("NUM_ROUNDS", 5))
+    training_rounds = int(os.environ.get("NUM_TRAINING_ROUNDS", 3))
+    
+    # Total rounds = 2 (preprocessing + initialization) + training_rounds
+    total_rounds = 2 + training_rounds
+    
     strategy = KaapanaStyleStrategy(
         fraction_fit=1.0,
         fraction_evaluate=0.0,
         min_available_clients=expected_clients,
         expected_num_clients=expected_clients,
     )
-    config = ServerConfig(num_rounds=num_rounds)
+    config = ServerConfig(num_rounds=total_rounds)
+    
+    print(f"[Server] Starting kaapana-style federated learning:")
+    print(f"[Server] - Expected clients: {expected_clients}")
+    print(f"[Server] - Training rounds: {training_rounds}")
+    print(f"[Server] - Total rounds: {total_rounds} (2 setup + {training_rounds} training)")
+    
     return ServerAppComponents(strategy=strategy, config=config)
 
 

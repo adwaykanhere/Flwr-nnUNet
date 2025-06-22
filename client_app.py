@@ -6,7 +6,7 @@ import flwr as fl
 from flwr.client import ClientApp, NumPyClient
 from flwr.common import Context, FitRes, EvaluateRes, NDArrays
 
-from flowernnunet.task import FedNnUNetTrainer
+from task import FedNnUNetTrainer
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -34,7 +34,6 @@ class NnUNet3DFullresClient(NumPyClient):
             fold=0,
             dataset_json=dataset_json,
             output_folder=output_folder,
-            device=os.environ.get("NNUNET_DEVICE", "cpu"),
             max_num_epochs=max_total_epochs,
         )
         self.local_epochs_per_round = local_epochs_per_round
@@ -70,6 +69,20 @@ class NnUNet3DFullresClient(NumPyClient):
             print(f"[Client {self.client_id}] Could not parse dataset.json: {exc}")
             return 1
 
+    def _apply_global_fingerprint(self, global_fingerprint: dict):
+        """Apply global fingerprint to local dataset_fingerprint.json file."""
+        try:
+            # Update local fingerprint file with global statistics
+            fingerprint_path = self.dataset_fingerprint_path
+            if os.path.exists(fingerprint_path):
+                with open(fingerprint_path, "w") as f:
+                    json.dump(global_fingerprint, f, indent=2)
+                print(f"[Client {self.client_id}] Applied global fingerprint to {fingerprint_path}")
+            else:
+                print(f"[Client {self.client_id}] Warning: fingerprint file not found at {fingerprint_path}")
+        except Exception as exc:
+            print(f"[Client {self.client_id}] Error applying global fingerprint: {exc}")
+
     def get_parameters(self, config) -> NDArrays:
         """
         Return current model parameters as a list of numpy arrays
@@ -85,16 +98,75 @@ class NnUNet3DFullresClient(NumPyClient):
     def fit(self, parameters: NDArrays, config) -> FitRes:
         """
         Receive global model params, do local partial training, return updated params + metrics.
+        Implements kaapana-style federated training with fingerprint handling.
         """
+        federated_round = config.get("server_round", 1)
+        
+        # Handle preprocessing round (federated_round = -2) - share fingerprint only
+        if federated_round == -2:
+            print(f"[Client {self.client_id}] Preprocessing round - sharing fingerprint")
+            if not self.trainer.was_initialized:
+                self.trainer.initialize()
+            
+            # Get initial parameters for consistency
+            if self.param_keys is None:
+                local_sd = self.trainer.get_weights()
+                self.param_keys = list(local_sd.keys())
+                
+            initial_params = [local_sd[k] for k in self.param_keys]
+            
+            metrics = {
+                "client_id": self.client_id,
+                "loss": 0.0,
+                "fingerprint": self.local_fingerprint,
+                "preprocessing_complete": True
+            }
+            return FitRes(parameters=initial_params, num_examples=self.num_training_cases, metrics=metrics)
+        
+        # Handle initialization round (federated_round = -1) - apply global fingerprint
+        if federated_round == -1:
+            print(f"[Client {self.client_id}] Initialization round - applying global fingerprint")
+            global_fingerprint = config.get("global_fingerprint", {})
+            if global_fingerprint:
+                self._apply_global_fingerprint(global_fingerprint)
+            
+            if not self.trainer.was_initialized:
+                self.trainer.initialize()
+                
+            if self.param_keys is None:
+                local_sd = self.trainer.get_weights()
+                self.param_keys = list(local_sd.keys())
+                
+            # Apply received global parameters
+            if parameters:
+                new_sd = {}
+                for k, arr in zip(self.param_keys, parameters):
+                    new_sd[k] = arr
+                self.trainer.set_weights(new_sd)
+                
+            updated_dict = self.trainer.get_weights()
+            updated_params = [updated_dict[k] for k in self.param_keys]
+            
+            metrics = {
+                "client_id": self.client_id,
+                "loss": 0.0,
+                "initialization_complete": True
+            }
+            return FitRes(parameters=updated_params, num_examples=self.num_training_cases, metrics=metrics)
+
+        # Regular training rounds (federated_round >= 0)
+        print(f"[Client {self.client_id}] Training round {federated_round}")
+        
         if self.param_keys is None:
             local_sd = self.trainer.get_weights()
             self.param_keys = list(local_sd.keys())
 
-        # Convert list->dict
-        new_sd = {}
-        for k, arr in zip(self.param_keys, parameters):
-            new_sd[k] = arr
-        self.trainer.set_weights(new_sd)
+        # Convert list->dict and apply received parameters
+        if parameters:
+            new_sd = {}
+            for k, arr in zip(self.param_keys, parameters):
+                new_sd[k] = arr
+            self.trainer.set_weights(new_sd)
 
         # Local training
         local_epochs = config.get("local_epochs", self.local_epochs_per_round)
@@ -103,21 +175,19 @@ class NnUNet3DFullresClient(NumPyClient):
         updated_dict = self.trainer.get_weights()
         updated_params = [updated_dict[k] for k in self.param_keys]
 
-        # Example local metrics
+        # Training metrics
         final_loss = (
             self.trainer.all_train_losses[-1] if self.trainer.all_train_losses else 0.0
         )
 
-        local_fp = self.local_fingerprint
-
         metrics = {
             "client_id": self.client_id,
             "loss": final_loss,
-            "fingerprint": local_fp
+            "federated_round": federated_round,
+            "local_epochs_completed": local_epochs
         }
-        # Use number of local training samples to weight aggregation
-        num_examples = self.num_training_cases
-        return FitRes(parameters=updated_params, num_examples=num_examples, metrics=metrics)
+        
+        return FitRes(parameters=updated_params, num_examples=self.num_training_cases, metrics=metrics)
 
     def evaluate(self, parameters: NDArrays, config) -> EvaluateRes:
         """
@@ -149,7 +219,7 @@ def client_fn(context: Context):
     """
     client_id = context.node_config.get("partition-id", 0)
 
-    task_name = os.environ.get("TASK_NAME", "Dataset009_Spleen")
+    task_name = os.environ.get("TASK_NAME", "Dataset009_Spleen") #Update here with the relevant dataset json
     preproc_root = os.environ.get("nnUNet_preprocessed", "/workspace/nnUNet_preprocessed")
     plans_path = os.path.join(preproc_root, task_name, "nnUNetPlans.json")
     dataset_json = os.path.join(preproc_root, task_name, "dataset.json")
