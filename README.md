@@ -57,7 +57,7 @@ The implementation follows a 3-phase federated learning approach:
 
 1. **Clone the Repository**
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/adwaykanhere/Flwr-nnUNet.git
    cd Flwr-nnUNet
    ```
 
