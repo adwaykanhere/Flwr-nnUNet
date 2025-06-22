@@ -7,7 +7,7 @@ import sys
 def test_data_files():
     """Test if required data files exist and are valid"""
     
-    task_name = os.environ.get("TASK_NAME", "Dataset005_Prostate")
+    task_name = os.environ.get("TASK_NAME", "Dataset005_Prostate")  # Default dataset, change as needed
     preproc_root = os.environ.get("nnUNet_preprocessed", "/mnt/c/Users/adway/Documents/nnUNet_preprocessed")
     
     print(f"Testing data files for task: {task_name}")
@@ -63,7 +63,7 @@ def test_simple_client_creation():
         print("✓ FedNnUNetTrainer import successful")
         
         # Test creating trainer without full initialization
-        task_name = os.environ.get("TASK_NAME", "Dataset005_Prostate")
+        task_name = os.environ.get("TASK_NAME", "Dataset005_Prostate")  # Default dataset, change as needed
         preproc_root = os.environ.get("nnUNet_preprocessed", "/mnt/c/Users/adway/Documents/nnUNet_preprocessed")
         plans_path = os.path.join(preproc_root, task_name, "nnUNetPlans.json")
         dataset_json = os.path.join(preproc_root, task_name, "dataset.json")

@@ -16,6 +16,70 @@ import json
 from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 
 
+class NnUNetDataset:
+    def __init__(self, keys, folder):
+        self.keys_list = keys
+        self.folder = folder
+        # Preload properties to avoid file access issues during training
+        self._properties_cache = {}
+        self._preload_properties()
+        
+    def _preload_properties(self):
+        """Preload all properties to avoid file I/O during training"""
+        import pickle
+        import os
+        print(f"[Dataset] Preloading properties for {len(self.keys_list)} cases...")
+        for key in self.keys_list:
+            props_file = os.path.join(self.folder, f"{key}.pkl")
+            try:
+                with open(props_file, 'rb') as f:
+                    self._properties_cache[key] = pickle.load(f)
+            except Exception as e:
+                print(f"[Dataset] Warning: Could not load properties for {key}: {e}")
+                self._properties_cache[key] = {}
+        
+    def keys(self):
+        return self.keys_list
+        
+    def __len__(self):
+        return len(self.keys_list)
+        
+    def __getitem__(self, key):
+        data, seg, properties = self.load_case(key)
+        return {
+            'data': data,
+            'seg': seg,
+            'properties': properties
+        }
+        
+    def load_case(self, key):
+        """Load actual nnUNet preprocessed .npz files and cached properties"""
+        import os
+        import numpy as np
+        
+        # Construct file paths for nnUNet preprocessed data
+        data_file = os.path.join(self.folder, f"{key}.npz")
+        
+        try:
+            # Load preprocessed nnUNet data
+            npz_data = np.load(data_file)
+            data = npz_data['data']  # Shape: (channels, z, y, x)
+            seg = npz_data['seg']    # Shape: (1, z, y, x)
+            
+            # Get cached properties
+            properties = self._properties_cache.get(key, {})
+            
+            # Ensure data is float32 and seg is int for compatibility
+            data = np.asarray(data, dtype=np.float32)
+            seg = np.asarray(seg, dtype=np.int32)
+            
+            return data, seg, properties
+            
+        except Exception as e:
+            print(f"[Dataset] Error loading {key}: {e}")
+            raise e  # Don't use dummy data, let the error propagate
+
+
 class FedNnUNetTrainer(nnUNetTrainer):
     """
     Custom trainer for nnU-Net v2 that supports partial (incremental) training each FL round.
@@ -24,29 +88,24 @@ class FedNnUNetTrainer(nnUNetTrainer):
 
     def __init__(
         self,
-        plans: str,      # Path to your "plans.json" containing "3d_fullres" or other configs
-        configuration: str,   # "3d_fullres" in your case
+        plans: dict,
+        configuration: str,
         fold: int,
-        dataset_json: str,    # Path to dataset.json describing local training data
-        output_folder: str,
-        device: torch.device = torch.device("cpu"),  # Force CPU to avoid CUDA issues in WSL2
-        max_num_epochs: int = 50,
+        dataset_json: dict,
+        unpack_dataset: bool = True,
+        device: torch.device = torch.device("cpu"),
     ):
-        with open(plans, "r") as f:
-            plans_dict = json.load(f)
-        with open(dataset_json, "r") as f:
-            dataset_dict = json.load(f)
-
         super().__init__(
-            plans=plans_dict,           # <--- pass dict, not "plans_path"
+            plans=plans,
             configuration=configuration,
             fold=fold,
-            dataset_json=dataset_dict,       # <--- pass dict, not "dataset_json" path
-            device=device, # if your trainer expects "device" by name
+            dataset_json=dataset_json,
+            unpack_dataset=unpack_dataset,
+            device=device,
         )
         
-        self.device = device
-        self.max_num_epochs = max_num_epochs
+        # Initialize federated learning specific attributes
+        self.max_num_epochs = 50  # Default value
         self.current_epoch = 0
         self.all_train_losses = []
     
@@ -68,34 +127,32 @@ class FedNnUNetTrainer(nnUNetTrainer):
 
             self.was_initialized = True
 
-    def get_case_identifiers_from_b2nd(self, folder: str):
+    def get_case_identifiers_from_npz(self, folder: str):
         """
-        Workaround: Find case identifiers from .b2nd files instead of .npz files.
-        This handles preprocessed data that uses the newer .b2nd format.
+        Find case identifiers from .npz files in the nnUNet preprocessed dataset.
         """
         import os
-        case_identifiers = [i[:-5] for i in os.listdir(folder) if i.endswith(".b2nd") and not i.endswith("_seg.b2nd")]
+        case_identifiers = [i[:-4] for i in os.listdir(folder) if i.endswith(".npz")]
         return case_identifiers
 
     def do_split(self):
         """
-        Override do_split to handle .b2nd files instead of .npz files.
-        This is a workaround for nnUNet v2 datasets that use .b2nd format.
+        Override do_split to handle nnUNet preprocessed .npz files.
         """
         from batchgenerators.utilities.file_and_folder_operations import isfile, join, save_json, load_json
         from nnunetv2.utilities.crossval_split import generate_crossval_split
         import numpy as np
         
         if self.fold == "all":
-            # Use our custom case identifier function for .b2nd files
-            case_identifiers = self.get_case_identifiers_from_b2nd(self.preprocessed_dataset_folder)
+            # Use our custom case identifier function for .npz files
+            case_identifiers = self.get_case_identifiers_from_npz(self.preprocessed_dataset_folder)
             tr_keys = case_identifiers
             val_keys = tr_keys
         else:
             splits_file = join(self.preprocessed_dataset_folder_base, "splits_final.json")
             
             # Use our custom case identifier function
-            case_identifiers = self.get_case_identifiers_from_b2nd(self.preprocessed_dataset_folder)
+            case_identifiers = self.get_case_identifiers_from_npz(self.preprocessed_dataset_folder)
             print(f"[Trainer] Found {len(case_identifiers)} case identifiers: {case_identifiers[:5]}...")
             
             if not isfile(splits_file):
@@ -115,84 +172,14 @@ class FedNnUNetTrainer(nnUNetTrainer):
 
     def get_tr_and_val_datasets(self):
         """
-        Override to handle .b2nd files by creating a custom dataset that can load them.
-        Uses real prostate data from .b2nd compressed files.
+        Override to handle nnUNet preprocessed .npz files with real medical imaging data.
         """
         # Get splits using our custom method
         tr_keys, val_keys = self.do_split()
         
-        # Create a dataset that can load real .b2nd files
-        class B2NDDataset:
-            def __init__(self, keys, folder):
-                self.keys_list = keys
-                self.folder = folder
-                # Preload properties to avoid file access issues during training
-                self._properties_cache = {}
-                self._preload_properties()
-                
-            def _preload_properties(self):
-                """Preload all properties to avoid file I/O during training"""
-                import pickle
-                import os
-                print(f"[Dataset] Preloading properties for {len(self.keys_list)} cases...")
-                for key in self.keys_list:
-                    props_file = os.path.join(self.folder, f"{key}.pkl")
-                    try:
-                        with open(props_file, 'rb') as f:
-                            self._properties_cache[key] = pickle.load(f)
-                    except Exception as e:
-                        print(f"[Dataset] Warning: Could not load properties for {key}: {e}")
-                        self._properties_cache[key] = {}
-                
-            def keys(self):
-                return self.keys_list
-                
-            def __len__(self):
-                return len(self.keys_list)
-                
-            def __getitem__(self, key):
-                data, seg, properties = self.load_case(key)
-                return {
-                    'data': data,
-                    'seg': seg,
-                    'properties': properties
-                }
-                
-            def load_case(self, key):
-                """Load actual .b2nd files and cached properties"""
-                import blosc2
-                import os
-                import numpy as np
-                
-                # Construct file paths
-                data_file = os.path.join(self.folder, f"{key}.b2nd")
-                seg_file = os.path.join(self.folder, f"{key}_seg.b2nd")
-                
-                try:
-                    # Load data and segmentation with error handling
-                    data = blosc2.open(data_file)[:]  # Shape: (channels, z, y, x)
-                    seg = blosc2.open(seg_file)[:]    # Shape: (1, z, y, x)
-                    
-                    # Get cached properties
-                    properties = self._properties_cache.get(key, {})
-                    
-                    # Ensure data is float32 and seg is int for compatibility
-                    data = np.asarray(data, dtype=np.float32)
-                    seg = np.asarray(seg, dtype=np.int32)
-                    
-                    return data, seg, properties
-                    
-                except Exception as e:
-                    print(f"[Dataset] Error loading {key}: {e}")
-                    # Return dummy data if loading fails
-                    import numpy as np
-                    dummy_data = np.zeros((1, 64, 64, 64), dtype=np.float32)
-                    dummy_seg = np.zeros((1, 64, 64, 64), dtype=np.int32)
-                    return dummy_data, dummy_seg, {}
-        
-        print(f"[Trainer] Creating B2ND datasets with real prostate data - tr: {len(tr_keys)}, val: {len(val_keys)}")
-        dataset_tr = B2NDDataset(tr_keys, self.preprocessed_dataset_folder)
-        dataset_val = B2NDDataset(val_keys, self.preprocessed_dataset_folder)
+        print(f"[Trainer] Creating nnUNet datasets with real medical data - tr: {len(tr_keys)}, val: {len(val_keys)}")
+        dataset_tr = NnUNetDataset(tr_keys, self.preprocessed_dataset_folder)
+        dataset_val = NnUNetDataset(val_keys, self.preprocessed_dataset_folder)
         
         return dataset_tr, dataset_val
 
@@ -306,7 +293,7 @@ def merge_local_fingerprints(local_fps: list[dict]) -> dict:
 def merge_dataset_fingerprints(local_fps: list[dict]) -> dict:
     """
     Merge nnU-Net dataset_fingerprint.json files from several clients.
-    Implements kaapana-style fingerprint aggregation using estimate mode.
+    Implements federated fingerprint aggregation for any nnUNet dataset.
     """
     if not local_fps:
         return {}

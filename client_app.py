@@ -4,7 +4,7 @@ import os
 import json
 import flwr as fl
 from flwr.client import ClientApp, NumPyClient
-from flwr.common import Context, FitRes, EvaluateRes, NDArrays
+from flwr.common import Context, FitRes, EvaluateRes, NDArrays, Status, Code
 
 from task import FedNnUNetTrainer
 import warnings
@@ -21,21 +21,30 @@ class NnUNet3DFullresClient(NumPyClient):
         plans_path: str,
         dataset_json: str,
         configuration: str,
-        output_folder: str,
         dataset_fingerprint: str | None = None,
         max_total_epochs: int = 50,
         local_epochs_per_round: int = 2,
     ):
         super().__init__()
         self.client_id = client_id
+        
+        # Load JSON files
+        import json
+        import torch
+        with open(plans_path, "r") as f:
+            plans_dict = json.load(f)
+        with open(dataset_json, "r") as f:
+            dataset_dict = json.load(f)
+        
         self.trainer = FedNnUNetTrainer(
-            plans=plans_path,
+            plans=plans_dict,
             configuration=configuration,
             fold=0,
-            dataset_json=dataset_json,
-            output_folder=output_folder,
-            max_num_epochs=max_total_epochs,
+            dataset_json=dataset_dict,
+            unpack_dataset=True,
+            device=torch.device("cpu"),
         )
+        self.trainer.max_num_epochs = max_total_epochs
         self.local_epochs_per_round = local_epochs_per_round
         self.param_keys = None
         self.dataset_fingerprint_path = dataset_fingerprint or os.path.join(
@@ -152,7 +161,12 @@ class NnUNet3DFullresClient(NumPyClient):
                 "loss": 0.0,
                 "initialization_complete": True
             }
-            return FitRes(parameters=updated_params, num_examples=self.num_training_cases, metrics=metrics)
+            return FitRes(
+                status=Status(code=Code.OK, message="Success"),
+                parameters=updated_params, 
+                num_examples=self.num_training_cases, 
+                metrics=metrics
+            )
 
         # Regular training rounds (federated_round >= 0)
         print(f"[Client {self.client_id}] Training round {federated_round}")
@@ -187,7 +201,12 @@ class NnUNet3DFullresClient(NumPyClient):
             "local_epochs_completed": local_epochs
         }
         
-        return FitRes(parameters=updated_params, num_examples=self.num_training_cases, metrics=metrics)
+        return FitRes(
+            status=Status(code=Code.OK, message="Success"),
+            parameters=updated_params, 
+            num_examples=self.num_training_cases, 
+            metrics=metrics
+        )
 
     def evaluate(self, parameters: NDArrays, config) -> EvaluateRes:
         """
@@ -206,6 +225,7 @@ class NnUNet3DFullresClient(NumPyClient):
         # Example local validation
         val_loss = 0.5  # or run actual inference
         return EvaluateRes(
+            status=Status(code=Code.OK, message="Success"),
             loss=val_loss,
             num_examples=self.num_training_cases,
             metrics={"val_loss": val_loss},
@@ -219,7 +239,7 @@ def client_fn(context: Context):
     """
     client_id = context.node_config.get("partition-id", 0)
 
-    task_name = os.environ.get("TASK_NAME", "Dataset005_Prostate") #Update here with the relevant dataset json
+    task_name = os.environ.get("TASK_NAME", "Dataset005_Prostate") # Default to Dataset005_Prostate, change as needed
     preproc_root = os.environ.get("nnUNet_preprocessed", "/mnt/c/Users/adway/Documents/nnUNet_preprocessed")
     plans_path = os.path.join(preproc_root, task_name, "nnUNetPlans.json")
     dataset_json = os.path.join(preproc_root, task_name, "dataset.json")
@@ -234,7 +254,6 @@ def client_fn(context: Context):
         plans_path=plans_path,
         dataset_json=dataset_json,
         configuration=configuration,
-        output_folder=output_folder,
         dataset_fingerprint=dataset_fp,
         max_total_epochs=50,
         local_epochs_per_round=2,

@@ -1,6 +1,6 @@
 # Federated nnU-Net with Flower Framework
 
-This project implements a federated learning version of nnU-Net using the Flower framework, similar to the approach used in the Kaapana platform. It enables distributed training of medical image segmentation models while keeping data decentralized.
+This project implements a federated learning version of nnU-Net using the Flower framework. It enables distributed training of medical image segmentation models across multiple clients while keeping data decentralized and private.
 
 ## Overview
 
@@ -11,17 +11,18 @@ The implementation follows a 3-phase federated learning approach:
 
 ## Key Features
 
-- ✅ **Real Medical Data Support**: Handles nnU-Net v2 preprocessed data in .b2nd compressed format
-- ✅ **Kaapana-Style Federation**: Implements the multi-phase approach used in clinical federated learning
+- ✅ **Real Medical Data Support**: Handles nnU-Net v2 preprocessed data in standard .npz/.pkl format
+- ✅ **Multi-Phase Federation**: Implements fingerprint collection, initialization, and training phases
 - ✅ **CPU-Only Execution**: Optimized for environments without GPU access or CUDA issues
 - ✅ **Cross-Validation Support**: Maintains nnU-Net's 5-fold cross-validation splits
-- ✅ **Real Properties Integration**: Uses actual medical imaging metadata (spacing, class_locations, etc.)
+- ✅ **Any nnUNet Dataset**: Works with any nnUNet-compatible medical imaging dataset
+- ✅ **Real Properties Integration**: Uses actual medical imaging metadata and preserves data privacy
 
 ## Architecture
 
 ### Components
 
-1. **`server_app.py`**: Implements `KaapanaStyleStrategy` for coordinating the federated learning process
+1. **`server_app.py`**: Implements `NnUNetFederatedStrategy` for coordinating the federated learning process
 2. **`client_app.py`**: Handles client-side operations including fingerprint collection and local training
 3. **`task.py`**: Custom `FedNnUNetTrainer` that extends nnU-Net's trainer for federated scenarios
 4. **`pyproject.toml`**: Flower app configuration and federation settings
@@ -29,9 +30,9 @@ The implementation follows a 3-phase federated learning approach:
 ### Key Modifications
 
 #### Custom Data Loading (`task.py`)
-- **B2ND File Support**: Custom dataset loader for nnU-Net's compressed .b2nd files using blosc2
+- **nnUNet Format Support**: Custom dataset loader for nnU-Net's standard .npz/.pkl preprocessed files
 - **Property Caching**: Preloads all .pkl properties files to avoid I/O issues during training
-- **Safe Error Handling**: Graceful fallbacks when individual files fail to load
+- **Real Data Integration**: Works with actual nnUNet preprocessed datasets without dummy data
 - **CPU Optimization**: Aggressive multiprocessing disabling to prevent crashes
 
 #### Federated Strategy (`server_app.py`)
@@ -50,7 +51,7 @@ The implementation follows a 3-phase federated learning approach:
 
 1. **Python Environment**: Python 3.8+ with conda/pip
 2. **nnU-Net Installation**: nnU-Net v2 must be installed and configured
-3. **Preprocessed Data**: nnU-Net preprocessed dataset in .b2nd format
+3. **Preprocessed Data**: Any nnU-Net preprocessed dataset in standard .npz/.pkl format
 4. **Flower Framework**: Latest Flower with simulation support
 
 ### Installation Steps
@@ -102,22 +103,23 @@ The implementation follows a 3-phase federated learning approach:
    ├── nnUNetPlans.json
    ├── splits_final.json
    └── nnUNetPlans_3d_fullres/
-       ├── case_001.b2nd
+       ├── case_001.npz
        ├── case_001.pkl
-       ├── case_001_seg.b2nd
-       ├── case_002.b2nd
+       ├── case_002.npz
        ├── case_002.pkl
-       ├── case_002_seg.b2nd
        └── ...
    ```
 
 3. **Update Dataset Configuration**
    
-   Modify `client_app.py` to point to your dataset:
+   Modify `client_app.py` or set environment variables to point to your dataset:
    ```python
-   # Update these paths in client_app.py
-   dataset_base = "/path/to/nnUNet_preprocessed"
-   dataset_name = "Dataset005_Prostate"  # Change to your dataset
+   # In client_app.py, update the task_name default:
+   task_name = os.environ.get("TASK_NAME", "DatasetXXX_YourDataset")
+   
+   # Or set environment variable:
+   export TASK_NAME="Dataset009_Spleen"  # Change to your dataset
+   export nnUNet_preprocessed="/path/to/your/nnUNet_preprocessed"
    ```
 
 ### Configuration
@@ -157,9 +159,9 @@ The implementation follows a 3-phase federated learning approach:
 
 3. **Expected Output**
    ```
-   [Server] Starting kaapana-style federated learning
-   [Trainer] Found 32 case identifiers: ['prostate_00', 'prostate_01', ...]
-   [Trainer] Creating B2ND datasets with real prostate data - tr: 25, val: 7
+   [Server] Starting nnUNet federated learning
+   [Trainer] Found 32 case identifiers: ['case_00', 'case_01', ...]
+   [Trainer] Creating nnUNet datasets with real medical data - tr: 25, val: 7
    [Dataset] Preloading properties for 25 cases...
    ```
 
@@ -171,7 +173,7 @@ The implementation follows a 3-phase federated learning approach:
    - The code disables CUDA by default via environment variables
    - If you encounter crashes, ensure no other processes are using CUDA
 
-2. **Memory Issues with blosc2**
+2. **Memory Issues with Large Datasets**
    - The system preloads properties to minimize file I/O
    - For very large datasets, consider reducing `num-supernodes`
 
@@ -180,8 +182,9 @@ The implementation follows a 3-phase federated learning approach:
    - Check that all paths are correctly set in environment variables
 
 4. **Data Loading Failures**
-   - Verify .b2nd files exist and are readable
+   - Verify .npz files exist and are readable
    - Check that .pkl property files contain required fields like `class_locations`
+   - Ensure dataset is properly preprocessed with nnUNetv2_plan_and_preprocess
 
 ### Performance Optimization
 
@@ -196,10 +199,25 @@ The implementation follows a 3-phase federated learning approach:
 
 3. **Simulation Speed**: Reduce `num-server-rounds` for faster testing
 
+## Recent Updates
+
+### v2.0 - Real Data Integration (December 2024)
+- ✅ **Fixed Pickle Loading Errors**: Resolved multiprocessing issues with dataset classes
+- ✅ **Real Data Support**: Now loads actual nnUNet preprocessed .npz/.pkl files instead of dummy data
+- ✅ **Generic Dataset Support**: Updated codebase to work with any nnUNet dataset, not just prostate
+- ✅ **Improved Error Handling**: Better error messages and graceful handling of missing files
+- ✅ **Updated API Compatibility**: Fixed Flower client API compatibility issues
+
+### Migration from Dummy Data
+The system now processes real medical imaging data:
+- **Before**: Used placeholder/dummy data for testing
+- **After**: Loads actual nnUNet preprocessed files with real medical imaging properties
+- **Datasets Tested**: Prostate (Dataset005), Spleen (Dataset009)
+
 ## Technical Details
 
 ### File Format Compatibility
-- **Input**: nnU-Net v2 .b2nd compressed files (blosc2 format)
+- **Input**: nnU-Net v2 .npz preprocessed files (standard numpy format)
 - **Properties**: .pkl files containing medical imaging metadata
 - **Plans**: nnUNetPlans.json with 3d_fullres configuration
 
@@ -227,7 +245,7 @@ When extending this implementation:
 This implementation is based on:
 - [nnU-Net v2](https://github.com/MIC-DKFZ/nnUNet) for medical image segmentation
 - [Flower Framework](https://flower.dev/) for federated learning
-- [Kaapana Platform](https://kaapana.ai/) for the federated learning strategy
+- Federated learning concepts from medical AI research
 
 ## License
 

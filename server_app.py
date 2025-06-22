@@ -10,9 +10,9 @@ from flwr.server.client_proxy import ClientProxy
 from task import merge_dataset_fingerprints
 
 
-class KaapanaStyleStrategy(FedAvg):
+class NnUNetFederatedStrategy(FedAvg):
     """
-    FedAvg strategy that implements kaapana-style multi-phase federated learning:
+    FedAvg strategy that implements multi-phase federated learning for nnUNet:
     Round -2: Fingerprint collection (preprocessing)
     Round -1: Global fingerprint distribution (initialization) 
     Round 0+: Regular federated training rounds
@@ -26,7 +26,7 @@ class KaapanaStyleStrategy(FedAvg):
         self.current_phase = "preprocessing"  # preprocessing, initialization, training
 
     def configure_fit(self, server_round: int, parameters, client_manager):
-        """Configure the fit round with kaapana-style phase management."""
+        """Configure the fit round with multi-phase nnUNet federated learning."""
         
         # Determine federated round based on server round
         if server_round == 1:
@@ -126,7 +126,7 @@ def server_fn(context: Context):
     # Total rounds = 2 (preprocessing + initialization) + training_rounds
     total_rounds = 2 + training_rounds
     
-    strategy = KaapanaStyleStrategy(
+    strategy = NnUNetFederatedStrategy(
         fraction_fit=1.0,
         fraction_evaluate=0.0,
         min_available_clients=expected_clients,
@@ -134,7 +134,7 @@ def server_fn(context: Context):
     )
     config = ServerConfig(num_rounds=total_rounds)
     
-    print(f"[Server] Starting kaapana-style federated learning:")
+    print(f"[Server] Starting nnUNet federated learning:")
     print(f"[Server] - Expected clients: {expected_clients}")
     print(f"[Server] - Training rounds: {training_rounds}")
     print(f"[Server] - Total rounds: {total_rounds} (2 setup + {training_rounds} training)")
