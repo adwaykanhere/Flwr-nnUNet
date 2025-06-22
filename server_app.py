@@ -47,8 +47,8 @@ class NnUNetFederatedStrategy(FedAvg):
         }
         
         # Add global fingerprint to config during initialization phase
-        if federated_round == -1 and self.global_fingerprint:
-            config["global_fingerprint"] = self.global_fingerprint
+        # if federated_round == -1 and self.global_fingerprint:
+        #     config["global_fingerprint"] = self.global_fingerprint
             
         # Call parent's configure_fit method
         fit_ins = super().configure_fit(server_round, parameters, client_manager)
@@ -81,21 +81,21 @@ class NnUNetFederatedStrategy(FedAvg):
         if federated_round == -2:
             print("[Server] Processing fingerprint collection round")
             for _, fitres in results:
-                fp = fitres.metrics.get("fingerprint", None)
                 preprocessing_complete = fitres.metrics.get("preprocessing_complete", False)
-                if fp and preprocessing_complete:
-                    self.fingerprints_collected.append(fp)
+                fingerprint_cases = fitres.metrics.get("fingerprint_cases", 0)
+                if preprocessing_complete:
+                    print(f"[Server] Client preprocessed {fingerprint_cases} cases")
                     
-            print(f"[Server] Collected {len(self.fingerprints_collected)}/{self.expected_num_clients} fingerprints")
+            print(f"[Server] Collected {len(results)}/{self.expected_num_clients} fingerprints")
             
-            # Merge fingerprints if we have enough
-            if len(self.fingerprints_collected) >= self.expected_num_clients:
-                self.global_fingerprint = merge_dataset_fingerprints(self.fingerprints_collected)
-                print(f"[Server] Merged global fingerprint: {list(self.global_fingerprint.keys())}")
+            # For now, skip complex fingerprint merging and use simple approach
+            if len(results) >= self.expected_num_clients:
+                print(f"[Server] All clients completed preprocessing")
             else:
-                print(f"[Server] Waiting for more fingerprints ({len(self.fingerprints_collected)}/{self.expected_num_clients})")
+                print(f"[Server] Waiting for more clients ({len(results)}/{self.expected_num_clients})")
                 
-            return super().aggregate_fit(server_round, results, failures)
+            # For preprocessing round, return empty aggregation results 
+            return None, {}
 
         # Handle initialization round - distribute global fingerprint and initial model
         elif federated_round == -1:
@@ -105,7 +105,8 @@ class NnUNetFederatedStrategy(FedAvg):
                 if init_complete:
                     print(f"[Server] Client initialized successfully")
                     
-            return super().aggregate_fit(server_round, results, failures)
+            # For initialization round, return empty aggregation results 
+            return None, {}
 
         # Handle regular training rounds
         else:

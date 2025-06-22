@@ -13,6 +13,12 @@ dependencies = [
     "torch==2.5.1",
     "torchvision==0.20.1",
     "numpy==1.26.4",
+    "batchgenerators",
+    "SimpleITK",
+    "scikit-image",
+    "scipy",
+    "tifffile",
+    "nibabel",
 ]
 
 [tool.hatch.build.targets.wheel]

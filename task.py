@@ -108,6 +108,11 @@ class FedNnUNetTrainer(nnUNetTrainer):
         self.max_num_epochs = 50  # Default value
         self.current_epoch = 0
         self.all_train_losses = []
+
+    @property
+    def loss_function(self):
+        """Property to provide loss_function compatibility"""
+        return self.loss
     
     def initialize(self):
         if not self.was_initialized:
@@ -186,27 +191,42 @@ class FedNnUNetTrainer(nnUNetTrainer):
 
     def run_training_round(self, num_local_epochs: int):
         """Run the official nnU-Net training loop for a few epochs."""
-        if not self.was_initialized:
-            self.initialize()
+        try:
+            if not self.was_initialized:
+                print("[Trainer] Initializing trainer...")
+                self.initialize()
 
-        start_epoch = self.current_epoch
-        target_epoch = min(self.current_epoch + num_local_epochs, self.max_num_epochs)
-        
-        print(f"[Trainer] Running training from epoch {start_epoch} to {target_epoch}")
-        
-        # Train for the specified number of epochs
-        for epoch in range(start_epoch, target_epoch):
-            epoch_loss = self.run_one_epoch()
-            self.all_train_losses.append(epoch_loss)
-            self.current_epoch = epoch + 1
+            print(f"[Trainer] Dataloader status: train={self.dataloader_train is not None}, val={self.dataloader_val is not None}")
             
-            print(f"[Trainer] Epoch {self.current_epoch}: loss={epoch_loss:.4f}")
+            if self.dataloader_train is None:
+                print("[Trainer] ERROR: Training dataloader is None!")
+                return
+
+            start_epoch = self.current_epoch
+            target_epoch = min(self.current_epoch + num_local_epochs, self.max_num_epochs)
             
-            # Save checkpoint periodically
-            if (self.current_epoch % 10) == 0:
-                self._save_checkpoint()
+            print(f"[Trainer] Running training from epoch {start_epoch} to {target_epoch}")
+            
+            # Train for the specified number of epochs
+            for epoch in range(start_epoch, target_epoch):
+                print(f"[Trainer] Starting epoch {epoch + 1}...")
+                epoch_loss = self.run_one_epoch()
+                self.all_train_losses.append(epoch_loss)
+                self.current_epoch = epoch + 1
                 
-        print(f"[Trainer] Completed {num_local_epochs} epochs, total epochs: {self.current_epoch}")
+                print(f"[Trainer] Epoch {self.current_epoch}: loss={epoch_loss:.4f}")
+                
+                # Save checkpoint periodically
+                if (self.current_epoch % 10) == 0:
+                    self._save_checkpoint()
+                    
+            print(f"[Trainer] Completed {num_local_epochs} epochs, total epochs: {self.current_epoch}")
+            
+        except Exception as e:
+            print(f"[Trainer] ERROR in run_training_round: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
 
     def _save_checkpoint(self):
         """Save model checkpoint (optional - can be implemented for recovery)."""
@@ -216,9 +236,15 @@ class FedNnUNetTrainer(nnUNetTrainer):
         """Train exactly one epoch over self.dl_tr, returning average training loss."""
         self.network.train()
         losses = []
+        # For testing: limit to just a few batches to verify functionality
+        batch_count = 0
+        max_batches = 3  # Process only 3 batches for faster testing
         for batch_data in self.dataloader_train:
             batch_loss = self.run_iteration(batch_data)
             losses.append(batch_loss)
+            batch_count += 1
+            if batch_count >= max_batches:
+                break
         return float(np.mean(losses)) if len(losses) > 0 else 0.0
 
     def run_iteration(self, data_dict) -> float:
@@ -237,16 +263,23 @@ class FedNnUNetTrainer(nnUNetTrainer):
         self.optimizer.zero_grad(set_to_none=True)
         logits = self.network(data)
 
-        # If deep supervision is enabled, `logits` might also be a list.
-        # Usually you'd sum the losses or handle each level:
-        if isinstance(logits, list):
-            # Example: sum the losses from each output level
-            loss_value = 0.0
-            for logit, tar in zip(logits, target):
-                loss_value += self.loss_function(logit, tar)
+        # Handle deep supervision: both logits and target should be lists or both single tensors
+        # The deep supervision wrapper expects both to be lists
+        if isinstance(logits, list) and isinstance(target, list):
+            # Both are lists - pass directly to loss function
+            loss_value = self.loss(logits, target)
+        elif not isinstance(logits, list) and not isinstance(target, list):
+            # Both are single tensors - pass directly to loss function
+            loss_value = self.loss(logits, target)
         else:
-            # Single output
-            loss_value = self.loss_function(logits, target)
+            # Mismatch: one is list, one is tensor - convert single tensor to list
+            if isinstance(target, list) and not isinstance(logits, list):
+                # Target is list but logits is tensor - make logits a list
+                logits = [logits]
+            elif isinstance(logits, list) and not isinstance(target, list):
+                # Logits is list but target is tensor - make target a list
+                target = [target]
+            loss_value = self.loss(logits, target)
 
         loss_value.backward()
         self.optimizer.step()

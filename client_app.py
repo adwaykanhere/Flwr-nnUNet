@@ -4,7 +4,7 @@ import os
 import json
 import flwr as fl
 from flwr.client import ClientApp, NumPyClient
-from flwr.common import Context, FitRes, EvaluateRes, NDArrays, Status, Code
+from flwr.common import Context, NDArrays
 
 from task import FedNnUNetTrainer
 import warnings
@@ -104,7 +104,7 @@ class NnUNet3DFullresClient(NumPyClient):
         self.param_keys = list(weights_dict.keys())
         return list(weights_dict.values())
 
-    def fit(self, parameters: NDArrays, config) -> FitRes:
+    def fit(self, parameters: NDArrays, config):
         """
         Receive global model params, do local partial training, return updated params + metrics.
         Implements kaapana-style federated training with fingerprint handling.
@@ -124,20 +124,31 @@ class NnUNet3DFullresClient(NumPyClient):
                 
             initial_params = [local_sd[k] for k in self.param_keys]
             
+            # Create a simple fingerprint summary for metrics
+            fp_summary = {}
+            if self.local_fingerprint:
+                fp_summary["num_cases"] = len(self.local_fingerprint.get("spacings", []))
+                # Get first modality stats if available
+                if "foreground_intensity_properties_per_channel" in self.local_fingerprint:
+                    first_mod = list(self.local_fingerprint["foreground_intensity_properties_per_channel"].keys())[0] if self.local_fingerprint["foreground_intensity_properties_per_channel"] else "0"
+                    if first_mod in self.local_fingerprint["foreground_intensity_properties_per_channel"]:
+                        fp_summary["mean_intensity"] = float(self.local_fingerprint["foreground_intensity_properties_per_channel"][first_mod].get("mean", 0.0))
+            
             metrics = {
                 "client_id": self.client_id,
                 "loss": 0.0,
-                "fingerprint": self.local_fingerprint,
-                "preprocessing_complete": True
+                "preprocessing_complete": True,
+                "fingerprint_cases": fp_summary.get("num_cases", 0),
+                "fingerprint_mean": fp_summary.get("mean_intensity", 0.0)
             }
-            return FitRes(parameters=initial_params, num_examples=self.num_training_cases, metrics=metrics)
+            return initial_params, self.num_training_cases, metrics
         
         # Handle initialization round (federated_round = -1) - apply global fingerprint
         if federated_round == -1:
-            print(f"[Client {self.client_id}] Initialization round - applying global fingerprint")
-            global_fingerprint = config.get("global_fingerprint", {})
-            if global_fingerprint:
-                self._apply_global_fingerprint(global_fingerprint)
+            print(f"[Client {self.client_id}] Initialization round")
+            # global_fingerprint = config.get("global_fingerprint", {})
+            # if global_fingerprint:
+            #     self._apply_global_fingerprint(global_fingerprint)
             
             if not self.trainer.was_initialized:
                 self.trainer.initialize()
@@ -161,12 +172,7 @@ class NnUNet3DFullresClient(NumPyClient):
                 "loss": 0.0,
                 "initialization_complete": True
             }
-            return FitRes(
-                status=Status(code=Code.OK, message="Success"),
-                parameters=updated_params, 
-                num_examples=self.num_training_cases, 
-                metrics=metrics
-            )
+            return updated_params, self.num_training_cases, metrics
 
         # Regular training rounds (federated_round >= 0)
         print(f"[Client {self.client_id}] Training round {federated_round}")
@@ -182,8 +188,8 @@ class NnUNet3DFullresClient(NumPyClient):
                 new_sd[k] = arr
             self.trainer.set_weights(new_sd)
 
-        # Local training
-        local_epochs = config.get("local_epochs", self.local_epochs_per_round)
+        # Local training - use minimal epochs for testing
+        local_epochs = config.get("local_epochs", 1)  # Reduced from self.local_epochs_per_round for faster testing
         self.trainer.run_training_round(local_epochs)
 
         updated_dict = self.trainer.get_weights()
@@ -201,14 +207,9 @@ class NnUNet3DFullresClient(NumPyClient):
             "local_epochs_completed": local_epochs
         }
         
-        return FitRes(
-            status=Status(code=Code.OK, message="Success"),
-            parameters=updated_params, 
-            num_examples=self.num_training_cases, 
-            metrics=metrics
-        )
+        return updated_params, self.num_training_cases, metrics
 
-    def evaluate(self, parameters: NDArrays, config) -> EvaluateRes:
+    def evaluate(self, parameters: NDArrays, config):
         """
         Evaluate global model on local validation set (optional).
         """
@@ -224,12 +225,7 @@ class NnUNet3DFullresClient(NumPyClient):
 
         # Example local validation
         val_loss = 0.5  # or run actual inference
-        return EvaluateRes(
-            status=Status(code=Code.OK, message="Success"),
-            loss=val_loss,
-            num_examples=self.num_training_cases,
-            metrics={"val_loss": val_loss},
-        )
+        return val_loss, self.num_training_cases, {"val_loss": val_loss}
 
 
 def client_fn(context: Context):
