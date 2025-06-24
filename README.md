@@ -167,15 +167,6 @@ The implementation follows a 3-phase federated learning approach:
    - Training round progress
    - Model aggregation results
 
-3. **Expected Output**
-   ```
-   [Server] Starting nnUNet federated learning
-   [Trainer] Found 32 case identifiers: ['case_00', 'case_01', ...]
-   [Trainer] Creating nnUNet datasets with real medical data - tr: 25, val: 7
-   [Trainer] ✓ Batch 1: data shape torch.Size([2, 2, 20, 320, 256])
-   [Trainer] Batch 1 loss: 1.1357
-   ```
-
 ## GPU Usage
 
 ### Enabling GPU Training
@@ -226,15 +217,6 @@ nnUNet supports automatic mixed precision for faster GPU training:
 # This is handled automatically by nnUNet's native training pipeline
 # Mixed precision is enabled based on device capabilities
 ```
-
-### GPU vs CPU Performance
-
-| Aspect | CPU Training | GPU Training |
-|--------|-------------|--------------|
-| **Speed** | ~5-10 min/epoch | ~30-60 sec/epoch |
-| **Memory** | System RAM | GPU VRAM |
-| **Compatibility** | Universal | Requires CUDA |
-| **Recommended For** | Testing, limited resources | Production, faster training |
 
 ### GPU Troubleshooting
 
@@ -288,7 +270,7 @@ nnUNet supports automatic mixed precision for faster GPU training:
 
 1. **GPU Acceleration**: For best performance, use GPU training:
    ```python
-   device = torch.device("cuda")  # 10-20x faster than CPU
+   device = torch.device("cuda")  
    ```
 
 2. **CPU Optimization**: When using CPU, the system optimizes threading:
@@ -306,7 +288,7 @@ nnUNet supports automatic mixed precision for faster GPU training:
 
 ## Recent Updates
 
-### v3.0 - Native nnUNet Integration (December 2024)
+### v3.0 - Native nnUNet Integration 
 - ✅ **Native nnUNet Pipeline**: Completely replaced custom data loading with nnUNet's native dataloaders and transforms
 - ✅ **Fixed Transform Pipeline**: Resolved `TypeError: argument after ** must be a mapping, not NoneType` by using nnUNet's native data format
 - ✅ **Real Training Execution**: Now performs actual nnUNet training with real loss computation and parameter updates
@@ -314,7 +296,7 @@ nnUNet supports automatic mixed precision for faster GPU training:
 - ✅ **GPU Support**: Added comprehensive GPU support with proper CUDA configuration
 - ✅ **Performance Optimization**: Leverages nnUNet's proven training methods for optimal performance
 
-### v2.0 - Real Data Integration (June 2025)
+### v2.0 - Real Data Integration 
 - ✅ **Fixed Pickle Loading Errors**: Resolved multiprocessing issues with dataset classes
 - ✅ **Real Data Support**: Now loads actual nnUNet preprocessed .npz/.pkl files instead of dummy data
 - ✅ **Generic Dataset Support**: Updated codebase to work with any nnUNet dataset, not just prostate
