@@ -16,71 +16,6 @@ import json
 from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 
 
-class NnUNetDataset:
-    def __init__(self, keys, folder):
-        self.keys_list = keys
-        self.folder = folder
-        # Preload properties to avoid file access issues during training
-        self._properties_cache = {}
-        self._preload_properties()
-        
-    def _preload_properties(self):
-        """Preload all properties to avoid file I/O during training"""
-        import pickle
-        import os
-        print(f"[Dataset] Preloading properties for {len(self.keys_list)} cases...")
-        for key in self.keys_list:
-            props_file = os.path.join(self.folder, f"{key}.pkl")
-            try:
-                with open(props_file, 'rb') as f:
-                    self._properties_cache[key] = pickle.load(f)
-            except Exception as e:
-                print(f"[Dataset] Warning: Could not load properties for {key}: {e}")
-                self._properties_cache[key] = {}
-        
-    def keys(self):
-        return self.keys_list
-        
-    def __len__(self):
-        return len(self.keys_list)
-        
-    def __getitem__(self, key):
-        data, seg, properties = self.load_case(key)
-        return {
-            'data': data,
-            'seg': seg,
-            'properties': properties
-        }
-        
-    def load_case(self, key):
-        """Load actual nnUNet preprocessed .npz files and cached properties"""
-        import os
-        import numpy as np
-        
-        # Construct file paths for nnUNet preprocessed data
-        data_file = os.path.join(self.folder, f"{key}.npz")
-        
-        try:
-            # Load preprocessed nnUNet data
-            npz_data = np.load(data_file)
-            data = npz_data['data']  # Shape: (channels, z, y, x)
-            seg = npz_data['seg']    # Shape: (1, z, y, x)
-            
-            # Get cached properties
-            properties = self._properties_cache.get(key, {})
-            
-            # Ensure data is float32 and seg is int for compatibility
-            data = np.asarray(data, dtype=np.float32)
-            seg = np.asarray(seg, dtype=np.int32)
-            
-            return data, seg, properties
-            
-        except Exception as e:
-            print(f"[Dataset] Error loading {key} from {data_file}: {e}")
-            import traceback
-            traceback.print_exc()
-            raise e  # Don't use dummy data, let the error propagate
-
 
 class FedNnUNetTrainer(nnUNetTrainer):
     """
@@ -119,6 +54,12 @@ class FedNnUNetTrainer(nnUNetTrainer):
         """Property to provide loss_function compatibility"""
         return self.loss
     
+    def on_train_epoch_start(self):
+        """Override nnUNet's epoch start to avoid lr_scheduler conflicts in federated learning."""
+        self.network.train()
+        print(f"[Trainer] Starting epoch {self.current_epoch}")
+        print(f"[Trainer] Current learning rate: {self.optimizer.param_groups[0]['lr']:.6f}")
+
     def initialize(self):
         if not self.was_initialized:
             # Disable multiprocessing to avoid conflicts with Ray/Flower
@@ -130,25 +71,88 @@ class FedNnUNetTrainer(nnUNetTrainer):
             os.environ['nnUNet_n_proc_DA'] = '1'     # Disable nnUNet data augmentation multiprocessing
             os.environ['nnUNet_def_n_proc'] = '1'    # Disable default multiprocessing
             
-            super().initialize() # This will create the network, optimizer, loss, etc.
+            super().initialize() # This will create the network, optimizer, loss, AND dataloaders
             
-            # The parent initialize() doesn't create dataloaders, we need to do that manually
-            # We need to call the specific methods that create dataloaders
-            print("[Trainer] Creating dataloaders...")
+            # Now replace the default dataloaders with Ray-compatible ones
+            print("[Trainer] Replacing dataloaders with Ray-compatible versions...")
             print(f"[Trainer] Preprocessed dataset folder: {self.preprocessed_dataset_folder}")
             print(f"[Trainer] Configuration: {self.configuration_name}")
             print(f"[Trainer] Data identifier: {self.configuration_manager.data_identifier}")
             
-            # Check if the folder exists
+            # Validate real data availability
             import os
-            if os.path.exists(self.preprocessed_dataset_folder):
-                files = [f for f in os.listdir(self.preprocessed_dataset_folder) if f.endswith('.npz')]
-                print(f"[Trainer] Found {len(files)} .npz files in preprocessed folder")
-            else:
-                print(f"[Trainer] ERROR: Preprocessed dataset folder does not exist!")
+            if not os.path.exists(self.preprocessed_dataset_folder):
+                raise RuntimeError(f"Preprocessed dataset folder does not exist: {self.preprocessed_dataset_folder}")
                 
+            files = [f for f in os.listdir(self.preprocessed_dataset_folder) if f.endswith('.npz')]
+            print(f"[Trainer] Found {len(files)} .npz files in preprocessed folder")
+            
+            if len(files) == 0:
+                raise RuntimeError(f"No .npz data files found in {self.preprocessed_dataset_folder}")
+            
+            # Validate that we can access the data files for our splits
+            tr_keys, val_keys = self.do_split()
+            print(f"[Trainer] Validating data files for {len(tr_keys)} training and {len(val_keys)} validation cases...")
+            
+            missing_files = []
+            for key in tr_keys + val_keys:
+                data_file = os.path.join(self.preprocessed_dataset_folder, f"{key}.npz")
+                if not os.path.exists(data_file):
+                    missing_files.append(data_file)
+                    
+            if missing_files:
+                raise RuntimeError(f"Missing required data files: {missing_files}")
+                
+            print(f"[Trainer] ✓ All required data files are accessible")
+                
+            # Replace with our custom dataloaders
             self.dataloader_train, self.dataloader_val = self.get_dataloaders()
-            print(f"[Trainer] Dataloaders created - train: {self.dataloader_train is not None}, val: {self.dataloader_val is not None}")
+            print(f"[Trainer] Ray-compatible dataloaders created - train: {self.dataloader_train is not None}, val: {self.dataloader_val is not None}")
+            
+            # Validate that we can generate real training batches
+            print("[Trainer] Validating dataloader can produce real medical data batches...")
+            try:
+                batch_count = 0
+                for batch_data in self.dataloader_train:
+                    if batch_data is None:
+                        raise RuntimeError("Dataloader returned None batch - this indicates a problem with transforms or data loading")
+                    
+                    if not isinstance(batch_data, dict):
+                        raise RuntimeError(f"Expected dict batch, got {type(batch_data)}")
+                    
+                    if 'data' not in batch_data or 'target' not in batch_data:
+                        raise RuntimeError(f"Batch missing required keys. Got: {list(batch_data.keys())}")
+                    
+                    data = batch_data['data']
+                    target = batch_data['target']
+                    
+                    # Handle deep supervision (target can be a list)
+                    if isinstance(target, list):
+                        target_shape = f"[{len(target)} levels: {[t.shape for t in target]}]"
+                        target_range = f"[{target[0].min()}, {target[0].max()}]"
+                        target_dtype = target[0].dtype
+                    else:
+                        target_shape = target.shape
+                        target_range = f"[{target.min()}, {target.max()}]"
+                        target_dtype = target.dtype
+                    
+                    print(f"[Trainer] ✓ Batch {batch_count + 1}: data shape {data.shape}, target shape {target_shape}")
+                    print(f"[Trainer] ✓ Data range: [{data.min():.3f}, {data.max():.3f}], dtype: {data.dtype}")
+                    print(f"[Trainer] ✓ Target range: {target_range}, dtype: {target_dtype}")
+                    
+                    # Validate this looks like real medical data
+                    if data.min() == data.max():
+                        raise RuntimeError("Data appears to be constant (dummy data) - need real medical images")
+                    
+                    batch_count += 1
+                    if batch_count >= 1:  # Just validate one batch
+                        break
+                        
+                print("[Trainer] ✓ Dataloader validation successful - real medical data confirmed")
+                
+            except Exception as e:
+                print(f"[Trainer] ✗ Dataloader validation failed: {e}")
+                raise RuntimeError(f"Dataloader cannot produce valid real data batches: {e}")
 
             self.was_initialized = True
 
@@ -197,24 +201,116 @@ class FedNnUNetTrainer(nnUNetTrainer):
 
     def get_tr_and_val_datasets(self):
         """
-        Override to handle nnUNet preprocessed .npz files with real medical imaging data.
+        Use nnUNet's native dataset loading approach for proper data handling.
         """
-        # Get splits using our custom method
+        # Get splits using nnUNet's native method
         tr_keys, val_keys = self.do_split()
         
         print(f"[Trainer] Creating nnUNet datasets with real medical data - tr: {len(tr_keys)}, val: {len(val_keys)}")
-        dataset_tr = NnUNetDataset(tr_keys, self.preprocessed_dataset_folder)
-        dataset_val = NnUNetDataset(val_keys, self.preprocessed_dataset_folder)
+        
+        # Use nnUNet's native dataset class
+        from nnunetv2.training.dataloading.nnunet_dataset import nnUNetDataset
+        dataset_tr = nnUNetDataset(self.preprocessed_dataset_folder, tr_keys,
+                                   folder_with_segs_from_previous_stage=self.folder_with_segs_from_previous_stage,
+                                   num_images_properties_loading_threshold=0)
+        dataset_val = nnUNetDataset(self.preprocessed_dataset_folder, val_keys,
+                                    folder_with_segs_from_previous_stage=self.folder_with_segs_from_previous_stage,
+                                    num_images_properties_loading_threshold=0)
         
         return dataset_tr, dataset_val
         
     def get_allowed_n_proc_DA(self):
-        """Override to force single-threaded data augmentation to avoid Ray conflicts"""
-        return 1
+        """Override to force minimal multiprocessing for Ray compatibility"""
+        return 1  # Use single process for Ray compatibility
+    
+    def get_dataloaders(self):
+        """Override get_dataloaders to use nnUNet's native dataloaders with Ray compatibility"""
+        # Use nnUNet's native method for proper data pipeline setup
+        patch_size = self.configuration_manager.patch_size
+        dim = len(patch_size)
+
+        # Get deep supervision scales using nnUNet's native method
+        deep_supervision_scales = self._get_deep_supervision_scales()
+
+        # Get data augmentation parameters using nnUNet's native method
+        (
+            rotation_for_DA,
+            do_dummy_2d_data_aug,
+            initial_patch_size,
+            mirror_axes,
+        ) = self.configure_rotation_dummyDA_mirroring_and_inital_patch_size()
+
+        print(f"[Trainer] Setting up nnUNet transforms using native nnUNet methods...")
+        print(f"[Trainer] ✓ patch_size: {patch_size}")
+        print(f"[Trainer] ✓ rotation_for_DA: {rotation_for_DA}")
+        print(f"[Trainer] ✓ deep_supervision_scales: {deep_supervision_scales}")
+        print(f"[Trainer] ✓ mirror_axes: {mirror_axes}")
+        print(f"[Trainer] ✓ do_dummy_2d_data_aug: {do_dummy_2d_data_aug}")
+        print(f"[Trainer] ✓ use_mask_for_norm: {self.configuration_manager.use_mask_for_norm}")
+
+        # Create transforms using nnUNet's native method
+        tr_transforms = self.get_training_transforms(
+            patch_size, rotation_for_DA, deep_supervision_scales, mirror_axes, do_dummy_2d_data_aug,
+            use_mask_for_norm=self.configuration_manager.use_mask_for_norm,
+            is_cascaded=self.is_cascaded, foreground_labels=self.label_manager.foreground_labels,
+            regions=self.label_manager.foreground_regions if self.label_manager.has_regions else None,
+            ignore_label=self.label_manager.ignore_label)
+
+        # validation pipeline
+        val_transforms = self.get_validation_transforms(deep_supervision_scales,
+                                                        is_cascaded=self.is_cascaded,
+                                                        foreground_labels=self.label_manager.foreground_labels,
+                                                        regions=self.label_manager.foreground_regions if
+                                                        self.label_manager.has_regions else None,
+                                                        ignore_label=self.label_manager.ignore_label)
+
+        # Use nnUNet's native datasets  
+        dataset_tr, dataset_val = self.get_tr_and_val_datasets()
+        
+        print(f"[Trainer] ✓ Successfully created native nnUNet training transforms: {type(tr_transforms)}")
+
+        # Import nnUNet's native dataloaders
+        if dim == 2:
+            from nnunetv2.training.dataloading.data_loader_2d import nnUNetDataLoader2D
+            dl_tr = nnUNetDataLoader2D(dataset_tr, self.batch_size,
+                                       initial_patch_size,
+                                       self.configuration_manager.patch_size,
+                                       self.label_manager,
+                                       oversample_foreground_percent=self.oversample_foreground_percent,
+                                       sampling_probabilities=None, pad_sides=None, transforms=tr_transforms)
+            dl_val = nnUNetDataLoader2D(dataset_val, self.batch_size,
+                                        self.configuration_manager.patch_size,
+                                        self.configuration_manager.patch_size,
+                                        self.label_manager,
+                                        oversample_foreground_percent=self.oversample_foreground_percent,
+                                        sampling_probabilities=None, pad_sides=None, transforms=val_transforms)
+        else:
+            from nnunetv2.training.dataloading.data_loader_3d import nnUNetDataLoader3D
+            dl_tr = nnUNetDataLoader3D(dataset_tr, self.batch_size,
+                                       initial_patch_size,
+                                       self.configuration_manager.patch_size,
+                                       self.label_manager,
+                                       oversample_foreground_percent=self.oversample_foreground_percent,
+                                       sampling_probabilities=None, pad_sides=None, transforms=tr_transforms)
+            dl_val = nnUNetDataLoader3D(dataset_val, self.batch_size,
+                                        self.configuration_manager.patch_size,
+                                        self.configuration_manager.patch_size,
+                                        self.label_manager,
+                                        oversample_foreground_percent=self.oversample_foreground_percent,
+                                        sampling_probabilities=None, pad_sides=None, transforms=val_transforms)
+
+        # Use SingleThreadedAugmenter for Ray compatibility (no multiprocessing)
+        from batchgenerators.dataloading.single_threaded_augmenter import SingleThreadedAugmenter
+        mt_gen_train = SingleThreadedAugmenter(dl_tr, None)  # transforms are already in the dataloader
+        mt_gen_val = SingleThreadedAugmenter(dl_val, None)
+        
+        print("[Trainer] Created Ray-compatible dataloaders with nnUNet's native data pipeline")
+        
+        return mt_gen_train, mt_gen_val
 
 
     def run_training_round(self, num_local_epochs: int):
-        """Run the official nnU-Net training loop for a few epochs."""
+        """Run Kaapana-style federated training loop for specified number of epochs."""
         try:
             if not self.was_initialized:
                 print("[Trainer] Initializing trainer...")
@@ -226,25 +322,68 @@ class FedNnUNetTrainer(nnUNetTrainer):
                 print("[Trainer] ERROR: Training dataloader is None!")
                 return
 
+            # Validate training setup
+            if self.network is None:
+                print("[Trainer] ERROR: Network is None!")
+                return
+                
+            if self.optimizer is None:
+                print("[Trainer] ERROR: Optimizer is None!")
+                return
+                
+            if self.loss is None:
+                print("[Trainer] ERROR: Loss function is None!")
+                return
+
             start_epoch = self.current_epoch
             target_epoch = min(self.current_epoch + num_local_epochs, self.max_num_epochs)
             
-            print(f"[Trainer] Running training from epoch {start_epoch} to {target_epoch}")
+            print(f"[Trainer] Running federated training round: epochs {start_epoch} to {target_epoch-1}")
+            print(f"[Trainer] Network has {sum(p.numel() for p in self.network.parameters())} parameters")
+            print(f"[Trainer] Network on device: {next(self.network.parameters()).device}")
             
-            # Train for the specified number of epochs
+            # Record initial parameters for comparison
+            initial_params = {name: param.clone().detach() for name, param in self.network.named_parameters()}
+            
+            # Train for the specified number of epochs  
+            epoch_losses = []
             for epoch in range(start_epoch, target_epoch):
-                print(f"[Trainer] Starting epoch {epoch + 1}...")
+                print(f"[Trainer] Starting federated epoch {epoch + 1}/{target_epoch}...")
+                
+                # Set learning rate if using scheduler
+                if hasattr(self, 'lr_scheduler') and self.lr_scheduler is not None:
+                    print(f"[Trainer] Current learning rate: {self.optimizer.param_groups[0]['lr']:.6f}")
+                
                 epoch_loss = self.run_one_epoch()
+                epoch_losses.append(epoch_loss)
                 self.all_train_losses.append(epoch_loss)
                 self.current_epoch = epoch + 1
                 
-                print(f"[Trainer] Epoch {self.current_epoch}: loss={epoch_loss:.4f}")
+                print(f"[Trainer] Completed epoch {self.current_epoch}: loss={epoch_loss:.4f}")
                 
-                # Save checkpoint periodically
-                if (self.current_epoch % 10) == 0:
-                    self._save_checkpoint()
+                # Update learning rate if using scheduler
+                if hasattr(self, 'lr_scheduler') and self.lr_scheduler is not None:
+                    self.lr_scheduler.step()
                     
-            print(f"[Trainer] Completed {num_local_epochs} epochs, total epochs: {self.current_epoch}")
+            # Check if parameters actually changed
+            param_changes = {}
+            total_change = 0.0
+            for name, param in self.network.named_parameters():
+                if name in initial_params:
+                    change = torch.norm(param.data - initial_params[name]).item()
+                    param_changes[name] = change
+                    total_change += change
+                    
+            print(f"[Trainer] Training round completed!")
+            print(f"[Trainer] - Epochs completed: {len(epoch_losses)}")
+            print(f"[Trainer] - Average loss: {np.mean(epoch_losses):.4f}")
+            print(f"[Trainer] - Total parameter change: {total_change:.6f}")
+            print(f"[Trainer] - Current total epochs: {self.current_epoch}")
+            
+            if total_change < 1e-8:
+                print("[Trainer] WARNING: Very small parameter changes detected - training may not be working properly")
+            else:
+                print(f"[Trainer] Parameters updated successfully (change magnitude: {total_change:.6f})")
             
         except Exception as e:
             print(f"[Trainer] ERROR in run_training_round: {e}")
@@ -257,31 +396,64 @@ class FedNnUNetTrainer(nnUNetTrainer):
         pass
 
     def run_one_epoch(self) -> float:
-        """Train exactly one epoch over self.dl_tr, returning average training loss."""
+        """Train exactly one epoch using nnUNet's native training approach."""
         try:
-            print(f"[Trainer] Setting network to training mode...")
-            self.network.train()
-            losses = []
+            # Use nnUNet's native epoch start method
+            self.on_train_epoch_start()
             
-            # For testing: limit to just a few batches to verify functionality
+            train_outputs = []
             batch_count = 0
-            max_batches = 3  # Process only 3 batches for faster testing
+            max_batches = 10  # Reasonable number for federated training
             
-            print(f"[Trainer] Starting to iterate over training dataloader (max {max_batches} batches)...")
+            print(f"[Trainer] Starting epoch {self.current_epoch} with up to {max_batches} batches...")
             
             for batch_data in self.dataloader_train:
-                print(f"[Trainer] Processing batch {batch_count + 1}/{max_batches}...")
-                batch_loss = self.run_iteration(batch_data)
-                losses.append(batch_loss)
-                batch_count += 1
-                print(f"[Trainer] Batch {batch_count} loss: {batch_loss:.4f}")
-                
-                if batch_count >= max_batches:
-                    break
                     
-            avg_loss = float(np.mean(losses)) if len(losses) > 0 else 0.0
-            print(f"[Trainer] Epoch completed. Average loss: {avg_loss:.4f}")
-            return avg_loss
+                print(f"[Trainer] Processing batch {batch_count + 1}/{max_batches}...")
+                
+                try:
+                    # Use nnUNet's native training step
+                    batch_result = self.train_step(batch_data)
+                    train_outputs.append(batch_result)
+                    batch_count += 1
+                    
+                    # Extract and print loss
+                    if isinstance(batch_result, dict) and 'loss' in batch_result:
+                        loss_val = batch_result['loss']
+                        if hasattr(loss_val, 'item'):
+                            loss_val = loss_val.item()
+                        print(f"[Trainer] Batch {batch_count} loss: {loss_val:.4f}")
+                    
+                    if batch_count >= max_batches:
+                        print(f"[Trainer] Completed {max_batches} batches, ending epoch")
+                        break
+                        
+                except Exception as batch_error:
+                    print(f"[Trainer] Error processing batch {batch_count + 1}: {batch_error}")
+                    import traceback
+                    traceback.print_exc()
+                    # Continue with next batch instead of failing completely
+                    continue
+            
+            # Use nnUNet's native epoch end method
+            if train_outputs:
+                self.on_train_epoch_end(train_outputs)
+                
+                # Calculate average loss for return
+                losses = []
+                for output in train_outputs:
+                    if isinstance(output, dict) and 'loss' in output:
+                        loss_val = output['loss']
+                        if hasattr(loss_val, 'item'):
+                            loss_val = loss_val.item()
+                        losses.append(loss_val)
+                
+                avg_loss = float(np.mean(losses)) if losses else 0.0
+                print(f"[Trainer] Epoch {self.current_epoch} completed. Processed {len(train_outputs)} batches. Average loss: {avg_loss:.4f}")
+                return avg_loss
+            else:
+                print(f"[Trainer] No successful batches processed in epoch {self.current_epoch}")
+                return 0.0
             
         except Exception as e:
             print(f"[Trainer] ERROR in run_one_epoch: {e}")
@@ -290,43 +462,42 @@ class FedNnUNetTrainer(nnUNetTrainer):
             raise
 
     def run_iteration(self, data_dict) -> float:
-        data = data_dict["data"]
-        target = data_dict["target"]
-
-        # Move data (always a tensor) to GPU/CPU device
-        data = data.to(self.device)
-
-        # If target is a list (deep supervision), convert each item
-        if isinstance(target, list):
-            target = [t.to(self.device) for t in target]
-        else:
-            target = target.to(self.device)
-
-        self.optimizer.zero_grad(set_to_none=True)
-        logits = self.network(data)
-
-        # Handle deep supervision: both logits and target should be lists or both single tensors
-        # The deep supervision wrapper expects both to be lists
-        if isinstance(logits, list) and isinstance(target, list):
-            # Both are lists - pass directly to loss function
-            loss_value = self.loss(logits, target)
-        elif not isinstance(logits, list) and not isinstance(target, list):
-            # Both are single tensors - pass directly to loss function
-            loss_value = self.loss(logits, target)
-        else:
-            # Mismatch: one is list, one is tensor - convert single tensor to list
-            if isinstance(target, list) and not isinstance(logits, list):
-                # Target is list but logits is tensor - make logits a list
-                logits = [logits]
-            elif isinstance(logits, list) and not isinstance(target, list):
-                # Logits is list but target is tensor - make target a list
-                target = [target]
-            loss_value = self.loss(logits, target)
-
-        loss_value.backward()
-        self.optimizer.step()
-
-        return loss_value.item()
+        """Process a single training batch using nnUNet's native train_step method."""
+        try:
+            # Use nnUNet's native training step which handles all the complexity
+            # This ensures we follow nnUNet's proven training pipeline
+            result = self.train_step(data_dict)
+            
+            # Extract loss value from result
+            if isinstance(result, dict) and 'loss' in result:
+                loss_value = result['loss']
+                if hasattr(loss_value, 'item'):
+                    return float(loss_value.item())
+                elif isinstance(loss_value, (int, float)):
+                    return float(loss_value)
+                elif hasattr(loss_value, '__len__') and len(loss_value) == 1:
+                    return float(loss_value[0])
+                else:
+                    return float(loss_value)
+            else:
+                print(f"[Trainer] Warning: Unexpected train_step result format: {type(result)}")
+                return 0.0
+            
+        except Exception as e:
+            print(f"[Trainer] Error in run_iteration: {e}")
+            print(f"[Trainer] Data dict keys: {list(data_dict.keys()) if isinstance(data_dict, dict) else 'not a dict'}")
+            if isinstance(data_dict, dict):
+                if 'data' in data_dict:
+                    data = data_dict['data']
+                    print(f"[Trainer] Data shape: {data.shape if hasattr(data, 'shape') else type(data)}")
+                if 'target' in data_dict:
+                    target = data_dict['target']
+                    print(f"[Trainer] Target type: {type(target)}")
+                    if hasattr(target, 'shape'):
+                        print(f"[Trainer] Target shape: {target.shape}")
+                    elif isinstance(target, list) and len(target) > 0:
+                        print(f"[Trainer] Target list length: {len(target)}, first shape: {target[0].shape if hasattr(target[0], 'shape') else 'unknown'}")
+            raise
 
     def get_weights(self):
         """Convert the model's state_dict into {layer_name: numpy_array}."""

@@ -73,10 +73,36 @@ class NnUNet3DFullresClient(NumPyClient):
         try:
             with open(self.dataset_json_path, "r") as f:
                 data = json.load(f)
-            return len(data.get("training", []))
+            
+            # nnUNet dataset.json uses "numTraining" field for total training cases
+            num_training = data.get("numTraining", 0)
+            print(f"[Client {self.client_id}] Found {num_training} total training cases in dataset.json")
+            
+            # However, for federated learning, we should return the actual number of cases
+            # this client will train on (which depends on the cross-validation split)
+            # For now, return the total and we'll get the actual split count from the trainer
+            return num_training
         except Exception as exc:
             print(f"[Client {self.client_id}] Could not parse dataset.json: {exc}")
             return 1
+
+    def _get_actual_training_count(self) -> int:
+        """Get the actual number of training cases this client is using from the trainer's split."""
+        try:
+            if hasattr(self.trainer, 'was_initialized') and self.trainer.was_initialized:
+                # Get the training split from the trainer
+                tr_keys, val_keys = self.trainer.do_split()
+                actual_count = len(tr_keys)
+                print(f"[Client {self.client_id}] Trainer split: {actual_count} training cases, {len(val_keys)} validation cases")
+                return actual_count
+            else:
+                # Fallback to dataset.json count if trainer not initialized
+                print(f"[Client {self.client_id}] Trainer not initialized, falling back to dataset.json count")
+                return self.num_training_cases
+        except Exception as exc:
+            print(f"[Client {self.client_id}] Error getting training count from trainer: {exc}")
+            # Fallback to the original dataset count
+            return self.num_training_cases if self.num_training_cases > 0 else 25  # Default for prostate dataset
 
     def _apply_global_fingerprint(self, global_fingerprint: dict):
         """Apply global fingerprint to local dataset_fingerprint.json file."""
@@ -134,14 +160,18 @@ class NnUNet3DFullresClient(NumPyClient):
                     if first_mod in self.local_fingerprint["foreground_intensity_properties_per_channel"]:
                         fp_summary["mean_intensity"] = float(self.local_fingerprint["foreground_intensity_properties_per_channel"][first_mod].get("mean", 0.0))
             
+            # Get actual training count for preprocessing phase too
+            actual_training_cases = self._get_actual_training_count()
+            
             metrics = {
                 "client_id": self.client_id,
                 "loss": 0.0,
                 "preprocessing_complete": True,
                 "fingerprint_cases": fp_summary.get("num_cases", 0),
-                "fingerprint_mean": fp_summary.get("mean_intensity", 0.0)
+                "fingerprint_mean": fp_summary.get("mean_intensity", 0.0),
+                "actual_training_cases": actual_training_cases
             }
-            return initial_params, self.num_training_cases, metrics
+            return initial_params, actual_training_cases, metrics
         
         # Handle initialization round (federated_round = -1) - apply global fingerprint
         if federated_round == -1:
@@ -167,12 +197,16 @@ class NnUNet3DFullresClient(NumPyClient):
             updated_dict = self.trainer.get_weights()
             updated_params = [updated_dict[k] for k in self.param_keys]
             
+            # Get actual training count for initialization phase too
+            actual_training_cases = self._get_actual_training_count()
+            
             metrics = {
                 "client_id": self.client_id,
                 "loss": 0.0,
-                "initialization_complete": True
+                "initialization_complete": True,
+                "actual_training_cases": actual_training_cases
             }
-            return updated_params, self.num_training_cases, metrics
+            return updated_params, actual_training_cases, metrics
 
         # Regular training rounds (federated_round >= 0)
         print(f"[Client {self.client_id}] Training round {federated_round}")
@@ -195,6 +229,10 @@ class NnUNet3DFullresClient(NumPyClient):
         updated_dict = self.trainer.get_weights()
         updated_params = [updated_dict[k] for k in self.param_keys]
 
+        # Get actual number of training cases from the trainer's split
+        actual_training_cases = self._get_actual_training_count()
+        print(f"[Client {self.client_id}] Using {actual_training_cases} training cases for FedAvg aggregation")
+
         # Training metrics
         final_loss = (
             self.trainer.all_train_losses[-1] if self.trainer.all_train_losses else 0.0
@@ -204,10 +242,11 @@ class NnUNet3DFullresClient(NumPyClient):
             "client_id": self.client_id,
             "loss": final_loss,
             "federated_round": federated_round,
-            "local_epochs_completed": local_epochs
+            "local_epochs_completed": local_epochs,
+            "actual_training_cases": actual_training_cases
         }
         
-        return updated_params, self.num_training_cases, metrics
+        return updated_params, actual_training_cases, metrics
 
     def evaluate(self, parameters: NDArrays, config):
         """
