@@ -76,9 +76,8 @@ The implementation follows a 3-phase federated learning approach:
 
 3. **Install nnU-Net v2**
    ```bash
-   # If not already installed
-   pip install nnunetv2
-   # OR install from source in development mode
+   # install from source in development mode
+   git clone https://github.com/MIC-DKFZ/nnUNet.git
    cd nnUNet && pip install -e .
    ```
 
