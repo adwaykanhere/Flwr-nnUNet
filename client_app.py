@@ -10,6 +10,30 @@ from task import FedNnUNetTrainer
 import warnings
 warnings.filterwarnings("ignore")
 
+
+def get_nnunet_preprocessed_path():
+    """Get nnUNet preprocessed path from environment variable with fallback."""
+    # Try environment variable first
+    nnunet_path = os.environ.get("nnUNet_preprocessed")
+    if nnunet_path and os.path.exists(nnunet_path):
+        print(f"[Client] Using nnUNet preprocessed path from environment: {nnunet_path}")
+        return nnunet_path
+    
+    # Fallback to hardcoded path with warning
+    fallback_path = "/local/projects-t3/isaiahlab/nnUNet_preprocessed/"
+    if os.path.exists(fallback_path):
+        print(f"[Client] WARNING: nnUNet_preprocessed environment variable not set.")
+        print(f"[Client] Using fallback path: {fallback_path}")
+        print(f"[Client] Please set: export nnUNet_preprocessed=/path/to/your/nnUNet_preprocessed")
+        return fallback_path
+    
+    # Error if no valid path found
+    raise RuntimeError(
+        f"nnUNet preprocessed directory not found. Please set the nnUNet_preprocessed environment variable:\n"
+        f"export nnUNet_preprocessed=/path/to/your/nnUNet_preprocessed\n"
+        f"Or ensure the directory exists at: {fallback_path}"
+    )
+
 class NnUNet3DFullresClient(NumPyClient):
     """
     Flower NumPyClient that uses FedNnUNetTrainer in 3D fullres mode.
@@ -41,8 +65,7 @@ class NnUNet3DFullresClient(NumPyClient):
             configuration=configuration,
             fold=0,
             dataset_json=dataset_dict,
-            unpack_dataset=True,
-            device=torch.device("cpu"),
+            device=torch.device("cuda:0"),
         )
         self.trainer.max_num_epochs = max_total_epochs
         self.local_epochs_per_round = local_epochs_per_round
@@ -275,12 +298,12 @@ def client_fn(context: Context):
     client_id = context.node_config.get("partition-id", 0)
 
     task_name = os.environ.get("TASK_NAME", "Dataset005_Prostate") # Default to Dataset005_Prostate, change as needed
-    preproc_root = os.environ.get("nnUNet_preprocessed", "/mnt/c/Users/adway/Documents/nnUNet_preprocessed")
+    preproc_root = get_nnunet_preprocessed_path()
     plans_path = os.path.join(preproc_root, task_name, "nnUNetPlans.json")
     dataset_json = os.path.join(preproc_root, task_name, "dataset.json")
     dataset_fp = os.path.join(preproc_root, task_name, "dataset_fingerprint.json")
     configuration = os.environ.get("NNUNET_CONFIG", "3d_fullres")
-    out_root = os.environ.get("OUTPUT_ROOT", "/mnt/c/Users/adway/Documents/nnunet_output")
+    out_root = os.environ.get("OUTPUT_ROOT", "/local/projects-t3/isaiahlab/nnunet_output")
     output_folder = os.path.join(out_root, f"client_{client_id}")
 
     # Create the client

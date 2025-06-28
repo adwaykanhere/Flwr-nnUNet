@@ -8,6 +8,32 @@ import sys
 import json
 import torch
 
+
+def get_nnunet_preprocessed_path():
+    """Get nnUNet preprocessed path from environment variable or user input."""
+    # Try environment variable first
+    nnunet_path = os.environ.get("nnUNet_preprocessed")
+    if nnunet_path and os.path.exists(nnunet_path):
+        print(f"Using nnUNet preprocessed path from environment: {nnunet_path}")
+        return nnunet_path
+    
+    # Ask user for path
+    while True:
+        nnunet_path = input("Please enter the path to your nnUNet_preprocessed directory: ").strip()
+        if not nnunet_path:
+            print("Path cannot be empty. Please try again.")
+            continue
+        
+        # Expand user home directory if needed
+        nnunet_path = os.path.expanduser(nnunet_path)
+        
+        if os.path.exists(nnunet_path):
+            print(f"Using nnUNet preprocessed path: {nnunet_path}")
+            return nnunet_path
+        else:
+            print(f"Directory does not exist: {nnunet_path}")
+            print("Please check the path and try again.")
+
 # Force CPU-only mode
 os.environ['CUDA_VISIBLE_DEVICES'] = ''
 os.environ['OMP_NUM_THREADS'] = '1'
@@ -21,9 +47,9 @@ def test_trainer_basic():
     
     from task import FedNnUNetTrainer
     
-    # Paths
+    # Get configurable paths
+    preproc_root = get_nnunet_preprocessed_path()
     task_name = "Dataset005_Prostate"
-    preproc_root = "/mnt/c/Users/adway/Documents/nnUNet_preprocessed"
     plans_path = os.path.join(preproc_root, task_name, "nnUNetPlans.json")
     dataset_json = os.path.join(preproc_root, task_name, "dataset.json")
     
@@ -48,7 +74,6 @@ def test_trainer_basic():
         configuration="3d_fullres",
         fold=0,
         dataset_json=dataset_dict,
-        unpack_dataset=True,
         device=torch.device("cpu"),
     )
     
@@ -79,9 +104,9 @@ def test_dataloader():
     
     from task import FedNnUNetTrainer
     
-    # Paths
+    # Get configurable paths
+    preproc_root = get_nnunet_preprocessed_path()
     task_name = "Dataset005_Prostate"
-    preproc_root = "/mnt/c/Users/adway/Documents/nnUNet_preprocessed"
     plans_path = os.path.join(preproc_root, task_name, "nnUNetPlans.json")
     dataset_json = os.path.join(preproc_root, task_name, "dataset.json")
     
@@ -96,7 +121,6 @@ def test_dataloader():
         configuration="3d_fullres",
         fold=0,
         dataset_json=dataset_dict,
-        unpack_dataset=True,
         device=torch.device("cpu"),
     )
     

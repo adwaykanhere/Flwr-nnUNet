@@ -12,14 +12,15 @@ The implementation follows a 3-phase federated learning approach:
 ## Key Features
 
 - ✅ **Native nnUNet Integration**: Uses nnUNet's proven dataloaders, transforms, and training methods
-- ✅ **Real Medical Data Support**: Handles nnU-Net v2 preprocessed data in standard .npz/.pkl format
+- ✅ **B2ND & NPZ Data Support**: Handles nnU-Net v2 preprocessed data in .b2nd and .npz formats with automatic detection
 - ✅ **Multi-Phase Federation**: Implements fingerprint collection, initialization, and training phases
 - ✅ **GPU & CPU Support**: Optimized for both GPU acceleration and CPU-only environments
 - ✅ **Deep Supervision**: Fully supports nnUNet's 6-level deep supervision architecture
 - ✅ **Cross-Validation Support**: Maintains nnU-Net's 5-fold cross-validation splits
 - ✅ **Any nnUNet Dataset**: Works with any nnUNet-compatible medical imaging dataset
 - ✅ **Real Training Execution**: Performs actual training with loss computation and parameter updates
-- ✅ **Real Properties Integration**: Uses actual medical imaging metadata and preserves data privacy
+- ✅ **Configurable Paths**: User-friendly path configuration with environment variables and prompts
+- ✅ **Unified DataLoader**: Single dataloader handles both 2D and 3D cases automatically
 
 ## Architecture
 
@@ -33,7 +34,9 @@ The implementation follows a 3-phase federated learning approach:
 ### Key Modifications
 
 #### Native nnUNet Integration (`task.py`)
-- **Native Dataloaders**: Uses nnUNet's `nnUNetDataLoader3D` and `nnUNetDataset` for proper data handling
+- **Unified DataLoader**: Uses nnUNet's `nnUNetDataLoader` with automatic 2D/3D detection
+- **Automatic Dataset Detection**: Uses `infer_dataset_class()` to automatically detect B2ND or NPZ formats
+- **B2ND & NPZ Support**: Seamlessly handles both compressed B2ND and standard NPZ data formats
 - **Native Training Pipeline**: Leverages nnUNet's `train_step` method and epoch management
 - **Native Transforms**: Uses nnUNet's proven data augmentation and preprocessing transforms
 - **Deep Supervision**: Properly handles nnUNet's multi-scale segmentation outputs
@@ -72,6 +75,7 @@ The implementation follows a 3-phase federated learning approach:
    # or using the project dependencies:
    pip install "flwr[simulation]>=1.15.2" "flwr-datasets[vision]>=0.5.0"
    pip install torch==2.5.1 torchvision==0.20.1 numpy==1.26.4
+   pip install blosc2  # Required for B2ND format support
    ```
 
 3. **Install nnU-Net v2**
@@ -98,7 +102,7 @@ The implementation follows a 3-phase federated learning approach:
    ```
 
 2. **Verify Data Structure**
-   Your preprocessed data should have this structure:
+   Your preprocessed data should have this structure (supports both B2ND and NPZ formats):
    ```
    nnUNet_preprocessed/DatasetXXX_Name/
    ├── dataset.json
@@ -106,23 +110,43 @@ The implementation follows a 3-phase federated learning approach:
    ├── nnUNetPlans.json
    ├── splits_final.json
    └── nnUNetPlans_3d_fullres/
-       ├── case_001.npz
-       ├── case_001.pkl
+       ├── case_001.b2nd          # Compressed format (preferred)
+       ├── case_001_seg.b2nd
+       ├── case_001.pkl           # Properties file
+       ├── case_002.b2nd
+       ├── case_002_seg.b2nd
+       ├── case_002.pkl
+       └── ...
+       
+   # OR alternatively with NPZ format:
+   └── nnUNetPlans_3d_fullres/
+       ├── case_001.npz           # Standard format
+       ├── case_001.pkl           # Properties file
        ├── case_002.npz
        ├── case_002.pkl
        └── ...
    ```
 
-3. **Update Dataset Configuration**
+3. **Configure Paths and Dataset**
    
-   Modify `client_app.py` or set environment variables to point to your dataset:
-   ```python
-   # In client_app.py, update the task_name default:
-   task_name = os.environ.get("TASK_NAME", "DatasetXXX_YourDataset")
-   
-   # Or set environment variable:
-   export TASK_NAME="Dataset009_Spleen"  # Change to your dataset
+   **Option A: Environment Variables (Recommended)**
+   ```bash
+   # Set your nnUNet preprocessed path
    export nnUNet_preprocessed="/path/to/your/nnUNet_preprocessed"
+   
+   # Set your dataset name
+   export TASK_NAME="Dataset009_Spleen"  # Change to your dataset
+   ```
+   
+   **Option B: Interactive Configuration**
+   - The system will prompt you for paths if environment variables are not set
+   - `test_trainer.py` will ask for the nnUNet_preprocessed path interactively
+   - `client_app.py` will show warnings and use fallback paths with guidance
+   
+   **Option C: Direct Modification**
+   ```python
+   # In client_app.py, update the fallback path in get_nnunet_preprocessed_path()
+   fallback_path = "/your/custom/nnUNet_preprocessed/"
    ```
 
 ### Configuration
@@ -261,9 +285,22 @@ nnUNet supports automatic mixed precision for faster GPU training:
    - Check that all paths are correctly set in environment variables
 
 4. **Data Loading Failures**
-   - Verify .npz files exist and are readable
-   - Check that .pkl property files contain required fields like `class_locations`
-   - Ensure dataset is properly preprocessed with nnUNetv2_plan_and_preprocess
+   - **B2ND Format**: Ensure `blosc2` is installed: `pip install blosc2`
+   - **NPZ Format**: Verify .npz files exist and are readable
+   - **Mixed Formats**: Don't mix B2ND and NPZ files in the same dataset folder
+   - **Properties**: Check that .pkl property files contain required fields like `class_locations`
+   - **Preprocessing**: Ensure dataset is properly preprocessed with nnUNetv2_plan_and_preprocess
+
+5. **Path Configuration Issues**
+   - **Environment Variable**: Ensure `nnUNet_preprocessed` is set: `echo $nnUNet_preprocessed`
+   - **Interactive Mode**: When prompted, provide the full absolute path
+   - **Permissions**: Ensure read access to the nnUNet_preprocessed directory
+   - **Dataset Name**: Verify `TASK_NAME` environment variable matches your dataset folder
+
+6. **B2ND Format Issues**
+   - **Missing blosc2**: Install with `pip install blosc2`
+   - **Corruption**: B2ND files may be corrupted, rerun preprocessing
+   - **Version Mismatch**: Ensure nnUNet v2 latest version for B2ND support
 
 ### Performance Optimization
 
@@ -287,6 +324,14 @@ nnUNet supports automatic mixed precision for faster GPU training:
 
 ## Recent Updates
 
+### v4.0 - B2ND Format Support & Path Configuration
+- ✅ **B2ND File Format Support**: Added native support for nnUNet's compressed B2ND format alongside NPZ
+- ✅ **Automatic Format Detection**: Uses `infer_dataset_class()` to automatically detect and load B2ND or NPZ datasets
+- ✅ **Unified DataLoader**: Replaced separate 2D/3D dataloaders with unified `nnUNetDataLoader` 
+- ✅ **Configurable Paths**: Removed hardcoded paths with environment variables and interactive prompts
+- ✅ **Improved User Experience**: Better error messages and guidance for path configuration
+- ✅ **Enhanced Documentation**: Comprehensive documentation for B2ND format and setup
+
 ### v3.0 - Native nnUNet Integration 
 - ✅ **Native nnUNet Pipeline**: Completely replaced custom data loading with nnUNet's native dataloaders and transforms
 - ✅ **Fixed Transform Pipeline**: Resolved `TypeError: argument after ** must be a mapping, not NoneType` by using nnUNet's native data format
@@ -301,6 +346,14 @@ nnUNet supports automatic mixed precision for faster GPU training:
 - ✅ **Generic Dataset Support**: Updated codebase to work with any nnUNet dataset, not just prostate
 - ✅ **Improved Error Handling**: Better error messages and graceful handling of missing files
 - ✅ **Updated API Compatibility**: Fixed Flower client API compatibility issues
+
+### What's New in v4.0
+The system now supports modern nnUNet data formats and improved usability:
+- **B2ND Support**: Automatically detects and loads compressed B2ND files for better performance
+- **Format Flexibility**: Seamlessly works with both B2ND and NPZ datasets without configuration
+- **Unified DataLoader**: Single dataloader handles both 2D and 3D cases automatically  
+- **User-Friendly Paths**: No more hardcoded paths - uses environment variables with interactive fallbacks
+- **Better Error Messages**: Clear guidance when paths are not configured correctly
 
 ### What's New in v3.0
 The system now uses nnUNet's native training pipeline:
@@ -319,10 +372,14 @@ The system now uses nnUNet's native training pipeline:
 - **Architecture**: Supports nnUNet's U-Net with deep supervision (6 output scales)
 
 ### File Format Compatibility
-- **Input**: nnU-Net v2 .npz preprocessed files (standard numpy format)
-- **Properties**: .pkl files containing medical imaging metadata
-- **Plans**: nnUNetPlans.json with 3d_fullres configuration
+- **Input Data**: 
+  - `.b2nd` files (compressed format, preferred for performance)
+  - `.npz` files (standard numpy format, legacy support)
+  - Automatic format detection and loading
+- **Properties**: `.pkl` files containing medical imaging metadata
+- **Plans**: `nnUNetPlans.json` with 3d_fullres configuration
 - **Deep Supervision**: Multi-scale targets at different resolutions
+- **Format Detection**: Uses `infer_dataset_class()` for automatic B2ND/NPZ detection
 
 ### Federated Learning Process
 1. **Fingerprint Phase**: Clients share dataset statistics (shapes, spacings, intensity properties)

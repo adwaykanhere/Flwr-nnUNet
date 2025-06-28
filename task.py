@@ -1,12 +1,18 @@
 # task.py
 
 import os
-# Force disable CUDA before importing torch to prevent initialization crashes
-os.environ['CUDA_VISIBLE_DEVICES'] = ''
+# Set CUDA environment for GPU training
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'  # Use GPU 0 for training
+os.environ['CUDA_HOME'] = '/usr/local/packages/cuda'
+os.environ['LD_LIBRARY_PATH'] = '/usr/local/packages/cuda/lib64:' + os.environ.get('LD_LIBRARY_PATH', '')
+# Optimize threading for GPU execution
 os.environ['OMP_NUM_THREADS'] = '1'
 os.environ['MKL_NUM_THREADS'] = '1'
 os.environ['NUMEXPR_NUM_THREADS'] = '1'
 os.environ['nnUNet_n_proc_DA'] = '1'
+os.environ["TOKENIZERS_PARALLELISM"] = "true"
+# CUDA memory management for stability
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:512'
 import torch
 import numpy as np
 import json
@@ -29,15 +35,13 @@ class FedNnUNetTrainer(nnUNetTrainer):
         configuration: str,
         fold: int,
         dataset_json: dict,
-        unpack_dataset: bool = True,
-        device: torch.device = torch.device("cpu"),
+        device: torch.device = torch.device("cuda:0"),
     ):
         super().__init__(
             plans=plans,
             configuration=configuration,
             fold=fold,
             dataset_json=dataset_json,
-            unpack_dataset=unpack_dataset,
             device=device,
         )
         
@@ -62,14 +66,15 @@ class FedNnUNetTrainer(nnUNetTrainer):
 
     def initialize(self):
         if not self.was_initialized:
-            # Disable multiprocessing to avoid conflicts with Ray/Flower
+            # Configure GPU execution and Ray compatibility
             import os
-            os.environ['OMP_NUM_THREADS'] = '1'
-            os.environ['CUDA_VISIBLE_DEVICES'] = ''  # Force no CUDA
-            os.environ['MKL_NUM_THREADS'] = '1'      # Disable Intel MKL threading
-            os.environ['NUMEXPR_NUM_THREADS'] = '1'  # Disable NumExpr threading
-            os.environ['nnUNet_n_proc_DA'] = '1'     # Disable nnUNet data augmentation multiprocessing
-            os.environ['nnUNet_def_n_proc'] = '1'    # Disable default multiprocessing
+            print(f"[Trainer] Initializing nnUNet trainer on device: {self.device}")
+            print(f"[Trainer] CUDA available: {torch.cuda.is_available()}")
+            if torch.cuda.is_available():
+                print(f"[Trainer] Current GPU: {torch.cuda.get_device_name(0)}")
+                print(f"[Trainer] GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+            # Ensure single-threaded execution for Ray compatibility
+            os.environ['nnUNet_def_n_proc'] = '1'
             
             super().initialize() # This will create the network, optimizer, loss, AND dataloaders
             
@@ -84,11 +89,13 @@ class FedNnUNetTrainer(nnUNetTrainer):
             if not os.path.exists(self.preprocessed_dataset_folder):
                 raise RuntimeError(f"Preprocessed dataset folder does not exist: {self.preprocessed_dataset_folder}")
                 
-            files = [f for f in os.listdir(self.preprocessed_dataset_folder) if f.endswith('.npz')]
-            print(f"[Trainer] Found {len(files)} .npz files in preprocessed folder")
+            npz_files = [f for f in os.listdir(self.preprocessed_dataset_folder) if f.endswith('.npz')]
+            b2nd_files = [f for f in os.listdir(self.preprocessed_dataset_folder) if f.endswith('.b2nd') and not f.endswith('_seg.b2nd')]
+            files = npz_files + b2nd_files
+            print(f"[Trainer] Found {len(npz_files)} .npz files and {len(b2nd_files)} .b2nd files in preprocessed folder")
             
             if len(files) == 0:
-                raise RuntimeError(f"No .npz data files found in {self.preprocessed_dataset_folder}")
+                raise RuntimeError(f"No .npz or .b2nd data files found in {self.preprocessed_dataset_folder}")
             
             # Validate that we can access the data files for our splits
             tr_keys, val_keys = self.do_split()
@@ -96,9 +103,10 @@ class FedNnUNetTrainer(nnUNetTrainer):
             
             missing_files = []
             for key in tr_keys + val_keys:
-                data_file = os.path.join(self.preprocessed_dataset_folder, f"{key}.npz")
-                if not os.path.exists(data_file):
-                    missing_files.append(data_file)
+                npz_file = os.path.join(self.preprocessed_dataset_folder, f"{key}.npz")
+                b2nd_file = os.path.join(self.preprocessed_dataset_folder, f"{key}.b2nd")
+                if not os.path.exists(npz_file) and not os.path.exists(b2nd_file):
+                    missing_files.append(f"{key} (neither .npz nor .b2nd)")
                     
             if missing_files:
                 raise RuntimeError(f"Missing required data files: {missing_files}")
@@ -156,32 +164,35 @@ class FedNnUNetTrainer(nnUNetTrainer):
 
             self.was_initialized = True
 
-    def get_case_identifiers_from_npz(self, folder: str):
+    def get_case_identifiers(self, folder: str):
         """
-        Find case identifiers from .npz files in the nnUNet preprocessed dataset.
+        Find case identifiers from .npz or .b2nd files in the nnUNet preprocessed dataset.
         """
         import os
-        case_identifiers = [i[:-4] for i in os.listdir(folder) if i.endswith(".npz")]
+        npz_identifiers = [i[:-4] for i in os.listdir(folder) if i.endswith(".npz")]
+        b2nd_identifiers = [i[:-5] for i in os.listdir(folder) if i.endswith(".b2nd") and not i.endswith("_seg.b2nd")]
+        # Combine and deduplicate identifiers
+        case_identifiers = list(set(npz_identifiers + b2nd_identifiers))
         return case_identifiers
 
     def do_split(self):
         """
-        Override do_split to handle nnUNet preprocessed .npz files.
+        Override do_split to handle nnUNet preprocessed .npz and .b2nd files.
         """
         from batchgenerators.utilities.file_and_folder_operations import isfile, join, save_json, load_json
         from nnunetv2.utilities.crossval_split import generate_crossval_split
         import numpy as np
         
         if self.fold == "all":
-            # Use our custom case identifier function for .npz files
-            case_identifiers = self.get_case_identifiers_from_npz(self.preprocessed_dataset_folder)
+            # Use our custom case identifier function for .npz and .b2nd files
+            case_identifiers = self.get_case_identifiers(self.preprocessed_dataset_folder)
             tr_keys = case_identifiers
             val_keys = tr_keys
         else:
             splits_file = join(self.preprocessed_dataset_folder_base, "splits_final.json")
             
             # Use our custom case identifier function
-            case_identifiers = self.get_case_identifiers_from_npz(self.preprocessed_dataset_folder)
+            case_identifiers = self.get_case_identifiers(self.preprocessed_dataset_folder)
             print(f"[Trainer] Found {len(case_identifiers)} case identifiers: {case_identifiers[:5]}...")
             
             if not isfile(splits_file):
@@ -208,14 +219,13 @@ class FedNnUNetTrainer(nnUNetTrainer):
         
         print(f"[Trainer] Creating nnUNet datasets with real medical data - tr: {len(tr_keys)}, val: {len(val_keys)}")
         
-        # Use nnUNet's native dataset class
-        from nnunetv2.training.dataloading.nnunet_dataset import nnUNetDataset
-        dataset_tr = nnUNetDataset(self.preprocessed_dataset_folder, tr_keys,
-                                   folder_with_segs_from_previous_stage=self.folder_with_segs_from_previous_stage,
-                                   num_images_properties_loading_threshold=0)
-        dataset_val = nnUNetDataset(self.preprocessed_dataset_folder, val_keys,
-                                    folder_with_segs_from_previous_stage=self.folder_with_segs_from_previous_stage,
-                                    num_images_properties_loading_threshold=0)
+        # Use nnUNet's native dataset class with automatic inference
+        from nnunetv2.training.dataloading.nnunet_dataset import infer_dataset_class
+        dataset_class = infer_dataset_class(self.preprocessed_dataset_folder)
+        dataset_tr = dataset_class(self.preprocessed_dataset_folder, tr_keys,
+                                   folder_with_segs_from_previous_stage=self.folder_with_segs_from_previous_stage)
+        dataset_val = dataset_class(self.preprocessed_dataset_folder, val_keys,
+                                    folder_with_segs_from_previous_stage=self.folder_with_segs_from_previous_stage)
         
         return dataset_tr, dataset_val
         
@@ -269,35 +279,20 @@ class FedNnUNetTrainer(nnUNetTrainer):
         
         print(f"[Trainer] ✓ Successfully created native nnUNet training transforms: {type(tr_transforms)}")
 
-        # Import nnUNet's native dataloaders
-        if dim == 2:
-            from nnunetv2.training.dataloading.data_loader_2d import nnUNetDataLoader2D
-            dl_tr = nnUNetDataLoader2D(dataset_tr, self.batch_size,
-                                       initial_patch_size,
-                                       self.configuration_manager.patch_size,
-                                       self.label_manager,
-                                       oversample_foreground_percent=self.oversample_foreground_percent,
-                                       sampling_probabilities=None, pad_sides=None, transforms=tr_transforms)
-            dl_val = nnUNetDataLoader2D(dataset_val, self.batch_size,
-                                        self.configuration_manager.patch_size,
-                                        self.configuration_manager.patch_size,
-                                        self.label_manager,
-                                        oversample_foreground_percent=self.oversample_foreground_percent,
-                                        sampling_probabilities=None, pad_sides=None, transforms=val_transforms)
-        else:
-            from nnunetv2.training.dataloading.data_loader_3d import nnUNetDataLoader3D
-            dl_tr = nnUNetDataLoader3D(dataset_tr, self.batch_size,
-                                       initial_patch_size,
-                                       self.configuration_manager.patch_size,
-                                       self.label_manager,
-                                       oversample_foreground_percent=self.oversample_foreground_percent,
-                                       sampling_probabilities=None, pad_sides=None, transforms=tr_transforms)
-            dl_val = nnUNetDataLoader3D(dataset_val, self.batch_size,
-                                        self.configuration_manager.patch_size,
-                                        self.configuration_manager.patch_size,
-                                        self.label_manager,
-                                        oversample_foreground_percent=self.oversample_foreground_percent,
-                                        sampling_probabilities=None, pad_sides=None, transforms=val_transforms)
+        # Import nnUNet's unified dataloader
+        from nnunetv2.training.dataloading.data_loader import nnUNetDataLoader
+        dl_tr = nnUNetDataLoader(dataset_tr, self.batch_size,
+                                 initial_patch_size,
+                                 self.configuration_manager.patch_size,
+                                 self.label_manager,
+                                 oversample_foreground_percent=self.oversample_foreground_percent,
+                                 sampling_probabilities=None, pad_sides=None, transforms=tr_transforms)
+        dl_val = nnUNetDataLoader(dataset_val, self.batch_size,
+                                  self.configuration_manager.patch_size,
+                                  self.configuration_manager.patch_size,
+                                  self.label_manager,
+                                  oversample_foreground_percent=self.oversample_foreground_percent,
+                                  sampling_probabilities=None, pad_sides=None, transforms=val_transforms)
 
         # Use SingleThreadedAugmenter for Ray compatibility (no multiprocessing)
         from batchgenerators.dataloading.single_threaded_augmenter import SingleThreadedAugmenter
