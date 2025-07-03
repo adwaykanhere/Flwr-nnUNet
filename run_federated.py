@@ -25,7 +25,7 @@ from typing import List, Tuple, Dict, Any
 
 def parse_arguments():
     """Parse command line arguments"""
-    parser = argparse.ArgumentParser(description='Enhanced Federated nnUNet Training')
+    parser = argparse.ArgumentParser(description='Flower based Federated nnUNet Training')
     
     # Dataset selection
     parser.add_argument('--dataset', type=str, default='Dataset005_Prostate',
@@ -101,7 +101,7 @@ args = parse_arguments()
 os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
 
 # Define paths
-preproc_root = '/autofs/projects-t3/isaiahlab/nnUNet_preprocessed'
+preproc_root = '/mnt/c/Users/adway/Documents/nnUNet_preprocessed'
 
 # Handle list datasets option
 if args.list_datasets:
@@ -188,7 +188,7 @@ try:
 
     def create_client(client_id: int):
         """Create a federated client"""
-        return NnUNet3DFullresClient(
+        client = NnUNet3DFullresClient(
             client_id=client_id,
             plans_path=plans_path,
             dataset_json=dataset_json,
@@ -196,6 +196,9 @@ try:
             max_total_epochs=NUM_ROUNDS * LOCAL_EPOCHS,
             local_epochs_per_round=LOCAL_EPOCHS
         )
+        # Set output directory for PyTorch model saving
+        client.set_output_directory(str(output_base))
+        return client
     
     def federated_averaging(client_params: List[Tuple[List[np.ndarray], int]]) -> List[np.ndarray]:
         """Simple FedAvg implementation"""
@@ -336,6 +339,22 @@ try:
                 
                 save_model_with_metadata(global_params, server_metadata, 
                                        server_output, round_num + 1, "global_model")
+                
+                # Also save PyTorch model for global model if validation was performed
+                if validation_dice and 'mean' in validation_dice:
+                    try:
+                        # Use the first client's trainer to save the global model in PyTorch format
+                        global_dice = validation_dice['mean']
+                        pytorch_checkpoint = clients[0].trainer.save_best_checkpoint_pytorch(
+                            output_dir=str(server_output),
+                            round_num=round_num + 1,
+                            validation_dice=global_dice,
+                            is_best=False  # We'll track this separately
+                        )
+                        if pytorch_checkpoint:
+                            print(f"💾 Saved global PyTorch checkpoint: {pytorch_checkpoint}")
+                    except Exception as e:
+                        print(f"⚠️ Failed to save global PyTorch checkpoint: {e}")
         else:
             print("❌ No clients completed training this round")
             break

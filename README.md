@@ -19,17 +19,21 @@ The implementation follows a 3-phase federated learning approach:
 - ✅ **Cross-Validation Support**: Maintains nnU-Net's 5-fold cross-validation splits
 - ✅ **Any nnUNet Dataset**: Works with any nnUNet-compatible medical imaging dataset
 - ✅ **Real Training Execution**: Performs actual training with loss computation and parameter updates
+- ✅ **Validation & Model Saving**: Automatic validation with Dice score calculation and best model tracking
+- ✅ **PyTorch Model Checkpoints**: Saves models in nnUNet-compatible .pth format for inference
 - ✅ **Configurable Paths**: User-friendly path configuration with environment variables and prompts
 - ✅ **Unified DataLoader**: Single dataloader handles both 2D and 3D cases automatically
+- ✅ **Enhanced CLI Interface**: Comprehensive command-line interface with run_federated.py script
 
 ## Architecture
 
 ### Components
 
-1. **`server_app.py`**: Implements `NnUNetFederatedStrategy` for coordinating the federated learning process
-2. **`client_app.py`**: Handles client-side operations including fingerprint collection and local training
-3. **`task.py`**: Custom `FedNnUNetTrainer` that extends nnU-Net's trainer for federated scenarios
-4. **`pyproject.toml`**: Flower app configuration and federation settings
+1. **`run_federated.py`**: Enhanced standalone script with comprehensive CLI for federated training
+2. **`server_app.py`**: Implements `NnUNetFederatedStrategy` for coordinating the federated learning process
+3. **`client_app.py`**: Handles client-side operations including fingerprint collection, local training, and model saving
+4. **`task.py`**: Custom `FedNnUNetTrainer` that extends nnU-Net's trainer for federated scenarios with validation and PyTorch model saving
+5. **`pyproject.toml`**: Flower app configuration and federation settings
 
 ### Key Modifications
 
@@ -178,17 +182,69 @@ The implementation follows a 3-phase federated learning approach:
 
 ### Running the Federated Training
 
+You can run federated training in two ways:
+
+#### Option 1: Standalone Script (Recommended)
+
+1. **Run the Enhanced Federated Script**
+   ```bash
+   python run_federated.py --dataset Dataset005_Prostate --clients 2 --rounds 3 --local-epochs 2 --validate
+   ```
+
+2. **Available Arguments**
+   ```bash
+   # Dataset selection
+   --dataset Dataset005_Prostate              # Specify dataset name
+   --list-datasets                            # List available datasets
+   
+   # Training configuration  
+   --clients 2                                # Number of federated clients
+   --rounds 5                                 # Number of federated learning rounds
+   --local-epochs 2                           # Local epochs per client per round
+   
+   # Validation options
+   --validate                                 # Enable validation during training (default)
+   --no-validate                              # Skip validation for faster training
+   --validation-frequency 1                   # Validate every N rounds
+   
+   # Model saving
+   --output-dir federated_models              # Output directory for saved models
+   --save-frequency 1                         # Save models every N rounds
+   
+   # System configuration
+   --gpu 0                                    # GPU device ID to use
+   ```
+
+3. **Example Commands**
+   ```bash
+   # List available datasets
+   python run_federated.py --list-datasets
+   
+   # Quick test run with minimal epochs
+   python run_federated.py --dataset Dataset005_Prostate --clients 2 --rounds 1 --local-epochs 1
+   
+   # Full training run with validation
+   python run_federated.py --dataset Dataset009_Spleen --clients 3 --rounds 10 --local-epochs 3 --validate
+   
+   # Training without validation for speed
+   python run_federated.py --dataset Dataset005_Prostate --clients 2 --rounds 5 --no-validate
+   ```
+
+#### Option 2: Flower Simulation Framework
+
 1. **Start the Simulation**
    ```bash
    flwr run .
    ```
 
 2. **Monitor Progress**
-   The simulation will output logs showing:
+   Both methods will output logs showing:
    - Dataset loading and case discovery
    - Fingerprint collection from clients
-   - Training round progress
+   - Training round progress with real loss values
+   - Validation Dice scores (if enabled)
    - Model aggregation results
+   - PyTorch model saving (.pth files)
 
 ## GPU Usage
 
@@ -323,6 +379,15 @@ nnUNet supports automatic mixed precision for faster GPU training:
 5. **Simulation Speed**: Reduce `num-server-rounds` for faster testing
 
 ## Recent Updates
+
+### v4.1 - Validation Fixes & Enhanced Model Saving
+- ✅ **Fixed Validation Data Loading**: Resolved "too many values to unpack (expected 3)" error by properly handling nnUNet's 4-tuple dataset return
+- ✅ **PyTorch Model Saving**: Implemented nnUNet-compatible .pth model checkpoints alongside existing .npz format
+- ✅ **Best Model Tracking**: Automatic saving of best performing models based on validation Dice scores
+- ✅ **Enhanced Validation Pipeline**: Added proper validation_step method matching nnUNet's expected return format
+- ✅ **Standalone Federated Script**: New `run_federated.py` with comprehensive command-line interface
+- ✅ **Validation Error Fixes**: Fixed tensor dimension issues in prediction resizing for 3D full-resolution models
+- ✅ **Client Best Model Tracking**: Each client tracks and saves their best performing local models
 
 ### v4.0 - B2ND Format Support & Path Configuration
 - ✅ **B2ND File Format Support**: Added native support for nnUNet's compressed B2ND format alongside NPZ

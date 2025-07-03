@@ -3,8 +3,8 @@
 import os
 # Set CUDA environment for GPU training
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'  # Use GPU 0 for training
-os.environ['CUDA_HOME'] = '/usr/local/packages/cuda'
-os.environ['LD_LIBRARY_PATH'] = '/usr/local/packages/cuda/lib64:' + os.environ.get('LD_LIBRARY_PATH', '')
+os.environ['CUDA_HOME'] = '/usr/local/cuda'
+os.environ['LD_LIBRARY_PATH'] = '/usr/local/cuda/lib64:' + os.environ.get('LD_LIBRARY_PATH', '')
 
 # Optimize threading for GPU execution and federated learning
 os.environ['OMP_NUM_THREADS'] = '1'
@@ -36,8 +36,6 @@ import json
 # nnU-Net v2: Update path if needed
 # Prefer the installed nnunetv2 package
 from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
-
-
 
 class FedNnUNetTrainer(nnUNetTrainer):
     """
@@ -565,7 +563,7 @@ class FedNnUNetTrainer(nnUNetTrainer):
 
     def run_validation_round(self) -> dict:
         """
-        Run validation inference and compute Dice scores following nnUNet approach
+        Run online validation using nnUNet's native validation pipeline with batched data
         
         Returns:
             Dictionary with validation metrics including Dice scores
@@ -573,183 +571,276 @@ class FedNnUNetTrainer(nnUNetTrainer):
         if not self.was_initialized:
             self.initialize()
         
-        print("[Trainer] Running validation...")
+        print("[Trainer] Running online validation...")
         
-        # Set network to evaluation mode
+        # Check if validation dataloader exists
+        if not hasattr(self, 'dataloader_val') or self.dataloader_val is None:
+            print("[Trainer] Warning: No validation dataloader available")
+            return {"per_label": {}, "mean": 0.0, "num_cases": 0}
+        
+        # Set network to evaluation mode and disable deep supervision like nnUNet does
         self.network.eval()
+        self.set_deep_supervision_enabled(False)
         
-        # Get validation cases from splits
-        _, val_keys = self.do_split()
+        print(f"[Trainer] Processing validation batches...")
         
-        if not val_keys:
-            print("[Trainer] Warning: No validation cases found")
-            return {"dice_scores": {}, "mean_dice": 0.0, "num_cases": 0}
+        val_outputs = []
+        batch_count = 0
+        max_val_batches = 10  # Limit validation batches for faster feedback
         
-        # Create validation dataset
-        dataset_val = self.dataset_class(self.preprocessed_dataset_folder, val_keys,
-                                       folder_with_segs_from_previous_stage=self.folder_with_segs_from_previous_stage)
-        
-        print(f"[Trainer] Validating on {len(val_keys)} cases...")
-        
-        all_dice_scores = []
-        processed_cases = 0
-        
-        with torch.no_grad():
-            for case_idx, case_id in enumerate(val_keys):
-                try:
-                    # Load case data
-                    data, _, properties = dataset_val.load_case(case_id)
+        try:
+            with torch.no_grad():
+                for batch_data in self.dataloader_val:
+                    # Use nnUNet's native validation_step method
+                    val_result = self.validation_step(batch_data)
+                    val_outputs.append(val_result)
+                    batch_count += 1
                     
-                    # Load ground truth segmentation
-                    seg_path = os.path.join(self.preprocessed_dataset_folder_base, 'gt_segmentations', f"{case_id}.nii.gz")
-                    if not os.path.exists(seg_path):
-                        # Try alternative segmentation path
-                        seg_path = os.path.join(self.preprocessed_dataset_folder_base, 'gt_segmentations', f"{case_id}_seg.nii.gz")
+                    if batch_count >= max_val_batches:
+                        print(f"[Trainer] Processed {max_val_batches} validation batches")
+                        break
+                        
+                # Use nnUNet's native aggregation method
+                if val_outputs:
+                    self.on_validation_epoch_end(val_outputs)
                     
-                    if not os.path.exists(seg_path):
-                        print(f"[Trainer] Warning: Ground truth not found for {case_id}, skipping")
-                        continue
+                    # Extract the computed metrics from the logger
+                    if hasattr(self, 'logger') and hasattr(self.logger, 'my_fantastic_logging'):
+                        logging_dict = self.logger.my_fantastic_logging
+                        if 'dice_per_class_or_region' in logging_dict and logging_dict['dice_per_class_or_region']:
+                            dice_per_class = logging_dict['dice_per_class_or_region'][-1]  # Latest values
+                            mean_fg_dice = np.nanmean(dice_per_class)
+                            
+                            # Create per-label results
+                            per_label_dict = {}
+                            for i, dice_val in enumerate(dice_per_class):
+                                if not np.isnan(dice_val):
+                                    per_label_dict[str(i + 1)] = float(dice_val)  # Labels start from 1
+                            
+                            validation_results = {
+                                "per_label": per_label_dict,
+                                "mean": float(mean_fg_dice),
+                                "num_batches": batch_count
+                            }
+                            
+                            print(f"[Trainer] Online validation complete: mean Dice = {mean_fg_dice:.4f} ({batch_count} batches)")
+                            return validation_results
                     
-                    # Load ground truth
-                    import SimpleITK as sitk
-                    gt_sitk = sitk.ReadImage(seg_path)
-                    gt_seg = sitk.GetArrayFromImage(gt_sitk)
-                    gt_seg = torch.from_numpy(gt_seg).long()
+                    # Fallback: manually aggregate if logger method fails
+                    from nnunetv2.utilities.collate_outputs import collate_outputs
+                    outputs_collated = collate_outputs(val_outputs)
+                    tp = np.sum(outputs_collated['tp_hard'], 0)
+                    fp = np.sum(outputs_collated['fp_hard'], 0)  
+                    fn = np.sum(outputs_collated['fn_hard'], 0)
                     
-                    # Convert data to tensor if needed
-                    if not isinstance(data, torch.Tensor):
-                        data = torch.from_numpy(data[:])  # [:] to convert blosc2 to numpy
+                    # Compute Dice scores manually
+                    dice_per_class = [2 * i / (2 * i + j + k) for i, j, k in zip(tp, fp, fn)]
+                    mean_fg_dice = np.nanmean(dice_per_class)
                     
-                    # Move to device
-                    data = data.to(self.device)
+                    per_label_dict = {}
+                    for i, dice_val in enumerate(dice_per_class):
+                        if not np.isnan(dice_val):
+                            per_label_dict[str(i + 1)] = float(dice_val)
                     
-                    # Run inference using simplified sliding window approach
-                    prediction_logits = self.predict_sliding_window_simple(data)
+                    validation_results = {
+                        "per_label": per_label_dict,
+                        "mean": float(mean_fg_dice),
+                        "num_batches": batch_count
+                    }
                     
-                    # Convert logits to segmentation
-                    prediction_seg = torch.argmax(prediction_logits, dim=0).cpu()
+                    print(f"[Trainer] Online validation complete: mean Dice = {mean_fg_dice:.4f} ({batch_count} batches)")
+                    return validation_results
+                else:
+                    print("[Trainer] Warning: No validation batches processed")
+                    return {"per_label": {}, "mean": 0.0, "num_batches": 0}
                     
-                    # Resize GT to match prediction if needed
-                    if gt_seg.shape != prediction_seg.shape:
-                        # Simple resize using interpolation
-                        import torch.nn.functional as F
-                        gt_seg = gt_seg.unsqueeze(0).unsqueeze(0).float()
-                        gt_seg = F.interpolate(gt_seg, size=prediction_seg.shape, mode='nearest')
-                        gt_seg = gt_seg.squeeze().long()
-                    
-                    # Compute Dice score for this case
-                    foreground_labels = self.label_manager.foreground_labels
-                    case_dice = self.compute_dice_score(prediction_seg, gt_seg, foreground_labels)
-                    all_dice_scores.append(case_dice)
-                    processed_cases += 1
-                    
-                    print(f"[Trainer] Case {case_idx + 1}/{len(val_keys)} ({case_id}): dice={case_dice.get('mean', 0):.3f}")
-                    
-                except Exception as e:
-                    print(f"[Trainer] Error validating case {case_id}: {e}")
-                    continue
-        
-        # Set network back to training mode
-        self.network.train()
-        
-        if not all_dice_scores:
-            print("[Trainer] Warning: No validation cases processed successfully")
-            return {"dice_scores": {}, "mean_dice": 0.0, "num_cases": 0}
-        
-        # Aggregate dice scores across all cases
-        aggregated_dice = {}
-        
-        # Get all unique labels
-        all_labels = set()
-        for dice_dict in all_dice_scores:
-            all_labels.update(k for k in dice_dict.keys() if k != 'mean')
-        
-        # Average dice scores per label
-        for label in all_labels:
-            label_scores = [d.get(label, 0) for d in all_dice_scores if not np.isnan(d.get(label, float('nan')))]
-            if label_scores:
-                aggregated_dice[label] = np.mean(label_scores)
-        
-        # Calculate overall mean
-        valid_means = [d.get('mean', 0) for d in all_dice_scores if not np.isnan(d.get('mean', float('nan')))]
-        overall_mean = np.mean(valid_means) if valid_means else 0.0
-        
-        validation_results = {
-            "per_label": aggregated_dice,
-            "mean": overall_mean,
-            "num_cases": processed_cases
-        }
-        
-        print(f"[Trainer] Validation complete: mean Dice = {overall_mean:.4f} ({processed_cases} cases)")
-        
-        return validation_results
+        except Exception as e:
+            print(f"[Trainer] Error during validation: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"per_label": {}, "mean": 0.0, "num_batches": 0}
+            
+        finally:
+            # Always restore training mode and deep supervision
+            self.network.train()
+            self.set_deep_supervision_enabled(True)
 
-    def predict_sliding_window_simple(self, data: torch.Tensor) -> torch.Tensor:
+
+    def validation_step(self, batch: dict) -> dict:
         """
-        Simplified sliding window prediction for validation
+        nnUNet-compatible validation step that returns tp_hard, fp_hard, fn_hard for Dice calculation
         
         Args:
-            data: Input data tensor [C, D, H, W]
+            batch: Dictionary with 'data' and 'target' keys
             
         Returns:
-            Prediction logits [num_classes, D, H, W]
+            Dictionary with loss, tp_hard, fp_hard, fn_hard for nnUNet validation
         """
-        # For simplicity, we'll use a single patch prediction instead of full sliding window
-        # This is faster for federated learning validation but less accurate than full nnUNet validation
-        
-        # Get target patch size from configuration
-        patch_size = self.configuration_manager.patch_size
-        
-        # Simple center crop or padding to patch size
-        input_shape = data.shape[1:]  # [D, H, W]
-        
-        # If input is smaller than patch size, pad it
-        padded_data = data
-        pads = []
-        for i, (input_dim, patch_dim) in enumerate(zip(input_shape, patch_size)):
-            if input_dim < patch_dim:
-                pad_total = patch_dim - input_dim
-                pad_before = pad_total // 2
-                pad_after = pad_total - pad_before
-                pads.extend([pad_before, pad_after])
-            else:
-                pads.extend([0, 0])
-        
-        if any(p > 0 for p in pads):
-            padded_data = torch.nn.functional.pad(data, pads[::-1])  # Reverse order for torch.pad
-        
-        # If input is larger than patch size, take center crop
-        cropped_data = padded_data
-        crop_coords = []
-        for i, (input_dim, patch_dim) in enumerate(zip(padded_data.shape[1:], patch_size)):
-            if input_dim > patch_dim:
-                start = (input_dim - patch_dim) // 2
-                crop_coords.append(slice(start, start + patch_dim))
-            else:
-                crop_coords.append(slice(None))
-        
-        if crop_coords:
-            cropped_data = padded_data[(slice(None),) + tuple(crop_coords)]
-        
-        # Add batch dimension and predict
-        batch_data = cropped_data.unsqueeze(0)  # [1, C, D, H, W]
-        
-        with torch.no_grad():
-            prediction = self.network(batch_data)
+        data = batch['data']
+        target = batch['target']
+
+        data = data.to(self.device, non_blocking=True)
+        if isinstance(target, list):
+            target = [i.to(self.device, non_blocking=True) for i in target]
+        else:
+            target = target.to(self.device, non_blocking=True)
+
+        # Run forward pass
+        with torch.autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else torch.no_grad():
+            output = self.network(data)
+            del data
             
-            # Handle deep supervision (take the highest resolution prediction)
-            if isinstance(prediction, (list, tuple)):
-                prediction = prediction[0]
+            # Ensure both output and target are in list format for deep supervision loss
+            if not isinstance(output, (list, tuple)):
+                output = [output]
+            if not isinstance(target, (list, tuple)):
+                target = [target]
+                
+            loss = self.loss(output, target)
+
+        # Handle deep supervision - use highest resolution output
+        if self.enable_deep_supervision:
+            output = output[0]
+            target = target[0]
+
+        # Calculate TP, FP, FN for Dice computation
+        axes = [0] + list(range(2, output.ndim))
+
+        if self.label_manager.has_regions:
+            predicted_segmentation_onehot = (torch.sigmoid(output) > 0.5).long()
+        else:
+            # Standard softmax case
+            output_seg = output.argmax(1)[:, None]
+            predicted_segmentation_onehot = torch.zeros(output.shape, device=output.device, dtype=torch.float32)
+            predicted_segmentation_onehot.scatter_(1, output_seg, 1)
+            del output_seg
+
+        # Handle ignore label if present
+        if self.label_manager.has_ignore_label:
+            if not self.label_manager.has_regions:
+                mask = (target != self.label_manager.ignore_label).float()
+                target[target == self.label_manager.ignore_label] = 0
+            else:
+                if target.dtype == torch.bool:
+                    mask = ~target[:, -1:]
+                else:
+                    mask = 1 - target[:, -1:]
+                target = target[:, :-1]
+        else:
+            mask = None
+
+        # Import nnUNet's tp/fp/fn calculation function
+        from nnunetv2.training.loss.dice import get_tp_fp_fn_tn
+        tp, fp, fn, _ = get_tp_fp_fn_tn(predicted_segmentation_onehot, target, axes=axes, mask=mask)
+
+        tp_hard = tp.detach().cpu().numpy()
+        fp_hard = fp.detach().cpu().numpy()
+        fn_hard = fn.detach().cpu().numpy()
+        
+        # Remove background class for standard training (not region-based)
+        if not self.label_manager.has_regions:
+            tp_hard = tp_hard[1:]  # Remove background
+            fp_hard = fp_hard[1:]
+            fn_hard = fn_hard[1:]
+
+        return {
+            'loss': loss.detach().cpu().numpy(),
+            'tp_hard': tp_hard,
+            'fp_hard': fp_hard,
+            'fn_hard': fn_hard
+        }
+
+    def save_best_checkpoint_pytorch(self, output_dir: str, round_num: int, validation_dice: float, 
+                                   is_best: bool = False) -> str:
+        """
+        Save model checkpoint in nnUNet's PyTorch format (.pth)
+        
+        Args:
+            output_dir: Directory to save the checkpoint
+            round_num: Current federated learning round
+            validation_dice: Current validation Dice score
+            is_best: Whether this is the best model so far
             
-            prediction = prediction.squeeze(0)  # Remove batch dimension
+        Returns:
+            Path to saved checkpoint file
+        """
+        import os
+        from pathlib import Path
         
-        # Resize prediction back to original input size if needed
-        if prediction.shape[1:] != input_shape:
-            import torch.nn.functional as F
-            prediction = F.interpolate(prediction.unsqueeze(0), size=input_shape, mode='trilinear', align_corners=False)
-            prediction = prediction.squeeze(0)
+        # Create output directory if it doesn't exist
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
         
-        return prediction
+        # Determine filename
+        if is_best:
+            filename = output_path / f"model_best_round_{round_num}.pth"
+        else:
+            filename = output_path / f"model_round_{round_num}.pth"
+        
+        # Prepare checkpoint data following nnUNet format
+        if hasattr(self, 'network') and self.network is not None:
+            checkpoint = {
+                'network_weights': self.network.state_dict(),
+                'optimizer_state': self.optimizer.state_dict() if hasattr(self, 'optimizer') and self.optimizer else None,
+                'current_epoch': getattr(self, 'current_epoch', round_num),
+                'validation_dice': validation_dice,
+                'federated_round': round_num,
+                'trainer_name': self.__class__.__name__,
+                'plans': getattr(self, 'plans', None),
+                'configuration': getattr(self, 'configuration_name', '3d_fullres'),
+                'fold': getattr(self, 'fold', 0),
+                'dataset_json': getattr(self, 'dataset_json', None),
+                'inference_allowed_mirroring_axes': getattr(self, 'inference_allowed_mirroring_axes', None),
+                'is_federated_model': True
+            }
+            
+            # Save checkpoint
+            torch.save(checkpoint, filename)
+            print(f"[Trainer] Saved {'best ' if is_best else ''}PyTorch checkpoint: {filename}")
+            print(f"[Trainer] Validation Dice: {validation_dice:.4f}")
+            
+            return str(filename)
+        else:
+            print(f"[Trainer] Warning: Cannot save checkpoint - network not initialized")
+            return None
+
+    def load_pytorch_checkpoint(self, checkpoint_path: str) -> dict:
+        """
+        Load a PyTorch checkpoint saved by save_best_checkpoint_pytorch
+        
+        Args:
+            checkpoint_path: Path to the checkpoint file
+            
+        Returns:
+            Dictionary containing checkpoint metadata
+        """
+        import os
+        
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+        
+        print(f"[Trainer] Loading PyTorch checkpoint: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        
+        if hasattr(self, 'network') and self.network is not None:
+            # Load network weights
+            self.network.load_state_dict(checkpoint['network_weights'])
+            
+            # Load optimizer state if available
+            if checkpoint.get('optimizer_state') and hasattr(self, 'optimizer') and self.optimizer:
+                self.optimizer.load_state_dict(checkpoint['optimizer_state'])
+            
+            print(f"[Trainer] Loaded checkpoint from round {checkpoint.get('federated_round', 'unknown')}")
+            print(f"[Trainer] Validation Dice: {checkpoint.get('validation_dice', 'unknown')}")
+            
+            return {
+                'validation_dice': checkpoint.get('validation_dice', 0.0),
+                'federated_round': checkpoint.get('federated_round', 0),
+                'current_epoch': checkpoint.get('current_epoch', 0)
+            }
+        else:
+            print(f"[Trainer] Warning: Cannot load checkpoint - network not initialized")
+            return {}
 
 
 def merge_local_fingerprints(local_fps: list[dict]) -> dict:

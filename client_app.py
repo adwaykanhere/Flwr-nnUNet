@@ -77,6 +77,11 @@ class NnUNet3DFullresClient(NumPyClient):
         self.dataset_json_path = dataset_json
         self.num_training_cases = self._count_training_cases()
         self.local_fingerprint = self._load_local_fingerprint()
+        
+        # Best validation tracking for PyTorch model saving
+        self.best_validation_dice = 0.0
+        self.best_round = 0
+        self.output_dir = None
 
     def _load_local_fingerprint(self) -> dict:
         if self.dataset_fingerprint_path and os.path.exists(self.dataset_fingerprint_path):
@@ -140,6 +145,16 @@ class NnUNet3DFullresClient(NumPyClient):
                 print(f"[Client {self.client_id}] Warning: fingerprint file not found at {fingerprint_path}")
         except Exception as exc:
             print(f"[Client {self.client_id}] Error applying global fingerprint: {exc}")
+
+    def set_output_directory(self, output_dir: str):
+        """Set the output directory for saving PyTorch model checkpoints"""
+        self.output_dir = output_dir
+        # Create client-specific subdirectory
+        import os
+        client_output_dir = os.path.join(output_dir, f"client_{self.client_id}")
+        os.makedirs(client_output_dir, exist_ok=True)
+        self.client_output_dir = client_output_dir
+        print(f"[Client {self.client_id}] Output directory set to: {client_output_dir}")
 
     def get_parameters(self, config) -> NDArrays:
         """
@@ -276,7 +291,33 @@ class NnUNet3DFullresClient(NumPyClient):
                 print(f"[Client {self.client_id}] Running validation...")
                 validation_results = self.trainer.run_validation_round()
                 metrics["validation_dice"] = validation_results
-                print(f"[Client {self.client_id}] Validation Dice: {validation_results.get('mean', 0):.4f}")
+                current_dice = validation_results.get('mean', 0)
+                print(f"[Client {self.client_id}] Validation Dice: {current_dice:.4f}")
+                
+                # Save PyTorch model if validation improved and output directory is set
+                if hasattr(self, 'client_output_dir') and self.client_output_dir:
+                    is_best = current_dice > self.best_validation_dice
+                    if is_best:
+                        self.best_validation_dice = current_dice
+                        self.best_round = federated_round
+                        print(f"[Client {self.client_id}] New best validation Dice: {current_dice:.4f}")
+                    
+                    # Save PyTorch checkpoint (both regular and best if improved)
+                    try:
+                        checkpoint_path = self.trainer.save_best_checkpoint_pytorch(
+                            output_dir=self.client_output_dir,
+                            round_num=federated_round,
+                            validation_dice=current_dice,
+                            is_best=is_best
+                        )
+                        if checkpoint_path:
+                            metrics["pytorch_checkpoint_saved"] = checkpoint_path
+                            if is_best:
+                                metrics["best_model_updated"] = True
+                                print(f"[Client {self.client_id}] Saved best model checkpoint: {checkpoint_path}")
+                    except Exception as save_e:
+                        print(f"[Client {self.client_id}] Failed to save PyTorch checkpoint: {save_e}")
+                        
             except Exception as e:
                 print(f"[Client {self.client_id}] Validation failed: {e}")
                 # Continue without validation metrics
