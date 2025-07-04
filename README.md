@@ -76,17 +76,12 @@ The implementation follows a 3-phase federated learning approach:
 2. **Install Dependencies**
    ```bash
    pip install -r requirements.txt
-   # or using the project dependencies:
-   pip install "flwr[simulation]>=1.15.2" "flwr-datasets[vision]>=0.5.0"
-   pip install torch==2.5.1 torchvision==0.20.1 numpy==1.26.4
-   pip install blosc2  # Required for B2ND format support
    ```
 
 3. **Install nnU-Net v2**
    ```bash
-   # install from source in development mode
+   # creat a copy of the source repo of nnUNet
    git clone https://github.com/MIC-DKFZ/nnUNet.git
-   cd nnUNet && pip install -e .
    ```
 
 4. **Setup Data Paths**
