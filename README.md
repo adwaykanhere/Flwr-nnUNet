@@ -375,46 +375,46 @@ nnUNet supports automatic mixed precision for faster GPU training:
 
 ## Recent Updates
 
-### v4.2 - Federated Logger Fix & Best Model Optimization
-- ✅ **Fixed Federated Logger Error**: Resolved "IndexError: list index out of range" in nnUNet logger during federated validation by properly initializing ema_fg_dice list
-- ✅ **Best Model Only Saving**: Optimized storage by saving only best performing models (both global and local) instead of all checkpoints
-- ✅ **Global Model Persistence**: Added server-side best global model saving in PyTorch `.pt` format to `global_models/global_best_model.pt`
-- ✅ **Improved Storage Efficiency**: Eliminated regular per-round checkpoint saving, keeping only best models with comprehensive metadata
-- ✅ **Enhanced Global Tracking**: Server now tracks best global validation scores across all federated rounds with proper aggregation
+### What's New in v6.2 - Federated Logger Fix & Best Model Optimization
+-  **Fixed Federated Logger Error**: Resolved "IndexError: list index out of range" in nnUNet logger during federated validation by properly initializing ema_fg_dice list
+-  **Best Model Only Saving**: Optimized storage by saving only best performing models (both global and local) instead of all checkpoints
+-  **Global Model Persistence**: Added server-side best global model saving in PyTorch `.pt` format to `global_models/global_best_model.pt`
+-  **Improved Storage Efficiency**: Eliminated regular per-round checkpoint saving, keeping only best models with comprehensive metadata
+-  **Enhanced Global Tracking**: Server now tracks best global validation scores across all federated rounds with proper aggregation
 
-### v4.1 - Validation Fixes & Enhanced Model Saving
-- ✅ **Fixed Validation Data Loading**: Resolved "too many values to unpack (expected 3)" error by properly handling nnUNet's 4-tuple dataset return
-- ✅ **PyTorch Model Saving**: Implemented nnUNet-compatible .pth model checkpoints alongside existing .npz format
-- ✅ **Best Model Tracking**: Automatic saving of best performing models based on validation Dice scores
-- ✅ **Enhanced Validation Pipeline**: Added proper validation_step method matching nnUNet's expected return format
-- ✅ **Standalone Federated Script**: New `run_federated.py` with comprehensive command-line interface
-- ✅ **Validation Error Fixes**: Fixed tensor dimension issues in prediction resizing for 3D full-resolution models
-- ✅ **Client Best Model Tracking**: Each client tracks and saves their best performing local models
+### What's New in v6.1 - Validation Fixes & Enhanced Model Saving
+-  **Fixed Validation Data Loading**: Resolved "too many values to unpack (expected 3)" error by properly handling nnUNet's 4-tuple dataset return
+-  **PyTorch Model Saving**: Implemented nnUNet-compatible .pth model checkpoints alongside existing .npz format
+-  **Best Model Tracking**: Automatic saving of best performing models based on validation Dice scores
+-  **Enhanced Validation Pipeline**: Added proper validation_step method matching nnUNet's expected return format
+-  **Standalone Federated Script**: New `run_federated.py` with comprehensive command-line interface
+-  **Validation Error Fixes**: Fixed tensor dimension issues in prediction resizing for 3D full-resolution models
+-  **Client Best Model Tracking**: Each client tracks and saves their best performing local models
 
-### v4.0 - B2ND Format Support & Path Configuration
-- ✅ **B2ND File Format Support**: Added native support for nnUNet's compressed B2ND format alongside NPZ
-- ✅ **Automatic Format Detection**: Uses `infer_dataset_class()` to automatically detect and load B2ND or NPZ datasets
-- ✅ **Unified DataLoader**: Replaced separate 2D/3D dataloaders with unified `nnUNetDataLoader` 
-- ✅ **Configurable Paths**: Removed hardcoded paths with environment variables and interactive prompts
-- ✅ **Improved User Experience**: Better error messages and guidance for path configuration
-- ✅ **Enhanced Documentation**: Comprehensive documentation for B2ND format and setup
+### What's New in v6.0 - B2ND Format Support & Path Configuration
+-  **B2ND File Format Support**: Added native support for nnUNet's compressed B2ND format alongside NPZ
+-  **Automatic Format Detection**: Uses `infer_dataset_class()` to automatically detect and load B2ND or NPZ datasets
+-  **Unified DataLoader**: Replaced separate 2D/3D dataloaders with unified `nnUNetDataLoader` 
+-  **Configurable Paths**: Removed hardcoded paths with environment variables and interactive prompts
+-  **Improved User Experience**: Better error messages and guidance for path configuration
+-  **Enhanced Documentation**: Comprehensive documentation for B2ND format and setup
 
-### v3.0 - Native nnUNet Integration 
-- ✅ **Native nnUNet Pipeline**: Completely replaced custom data loading with nnUNet's native dataloaders and transforms
-- ✅ **Fixed Transform Pipeline**: Resolved `TypeError: argument after ** must be a mapping, not NoneType` by using nnUNet's native data format
-- ✅ **Real Training Execution**: Now performs actual nnUNet training with real loss computation and parameter updates
-- ✅ **Deep Supervision Support**: Properly handles nnUNet's 6-level deep supervision architecture
-- ✅ **GPU Support**: Added comprehensive GPU support with proper CUDA configuration
-- ✅ **Performance Optimization**: Leverages nnUNet's proven training methods for optimal performance
+###  What's New in v5.0 - Native nnUNet Integration 
+-  **Native nnUNet Pipeline**: Completely replaced custom data loading with nnUNet's native dataloaders and transforms
+-  **Fixed Transform Pipeline**: Resolved `TypeError: argument after ** must be a mapping, not NoneType` by using nnUNet's native data format
+-  **Real Training Execution**: Now performs actual nnUNet training with real loss computation and parameter updates
+-  **Deep Supervision Support**: Properly handles nnUNet's 6-level deep supervision architecture
+-  **GPU Support**: Added comprehensive GPU support with proper CUDA configuration
+-  **Performance Optimization**: Leverages nnUNet's proven training methods for optimal performance
 
-### v2.0 - Real Data Integration 
-- ✅ **Fixed Pickle Loading Errors**: Resolved multiprocessing issues with dataset classes
-- ✅ **Real Data Support**: Now loads actual nnUNet preprocessed .npz/.pkl files instead of dummy data
-- ✅ **Generic Dataset Support**: Updated codebase to work with any nnUNet dataset, not just prostate
-- ✅ **Improved Error Handling**: Better error messages and graceful handling of missing files
-- ✅ **Updated API Compatibility**: Fixed Flower client API compatibility issues
+### What's New in v4.0 - Real Data Integration 
+-  **Fixed Pickle Loading Errors**: Resolved multiprocessing issues with dataset classes
+-  **Real Data Support**: Now loads actual nnUNet preprocessed .npz/.pkl files instead of dummy data
+-  **Generic Dataset Support**: Updated codebase to work with any nnUNet dataset, not just prostate
+-  **Improved Error Handling**: Better error messages and graceful handling of missing files
+-  **Updated API Compatibility**: Fixed Flower client API compatibility issues
 
-### What's New in v4.0
+### What's New in v3.0
 The system now supports modern nnUNet data formats and improved usability:
 - **B2ND Support**: Automatically detects and loads compressed B2ND files for better performance
 - **Format Flexibility**: Seamlessly works with both B2ND and NPZ datasets without configuration
@@ -422,7 +422,7 @@ The system now supports modern nnUNet data formats and improved usability:
 - **User-Friendly Paths**: No more hardcoded paths - uses environment variables with interactive fallbacks
 - **Better Error Messages**: Clear guidance when paths are not configured correctly
 
-### What's New in v3.0
+### What's New in v2.0
 The system now uses nnUNet's native training pipeline:
 - **Before**: Custom data loading and training logic that sometimes failed
 - **After**: Native nnUNet dataloaders, transforms, and training methods
