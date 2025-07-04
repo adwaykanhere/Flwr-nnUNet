@@ -602,7 +602,21 @@ class FedNnUNetTrainer(nnUNetTrainer):
                         
                 # Use nnUNet's native aggregation method
                 if val_outputs:
+                    # Fix for federated learning: ensure logger has consistent state
+                    # Store the current epoch and temporarily set it to 0 for validation
+                    original_epoch = self.current_epoch
+                    
+                    # Reset logger state for federated validation to prevent index errors
+                    if hasattr(self, 'logger') and hasattr(self.logger, 'my_fantastic_logging'):
+                        # Ensure ema_fg_dice has at least one element if current_epoch > 0
+                        if self.current_epoch > 0 and len(self.logger.my_fantastic_logging['ema_fg_dice']) == 0:
+                            # Initialize with a default value for the first validation in federated learning
+                            self.logger.my_fantastic_logging['ema_fg_dice'] = [0.0] * self.current_epoch
+                    
                     self.on_validation_epoch_end(val_outputs)
+                    
+                    # Restore original epoch
+                    self.current_epoch = original_epoch
                     
                     # Extract the computed metrics from the logger
                     if hasattr(self, 'logger') and hasattr(self.logger, 'my_fantastic_logging'):
@@ -771,11 +785,13 @@ class FedNnUNetTrainer(nnUNetTrainer):
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
         
-        # Determine filename
+        # Only save best models - simplified filename
         if is_best:
-            filename = output_path / f"model_best_round_{round_num}.pth"
+            filename = output_path / "model_best.pt"
         else:
-            filename = output_path / f"model_round_{round_num}.pth"
+            # Don't save regular checkpoints, only best models
+            print(f"[Trainer] Skipping regular checkpoint save, only saving best models")
+            return None
         
         # Prepare checkpoint data following nnUNet format
         if hasattr(self, 'network') and self.network is not None:
@@ -796,8 +812,9 @@ class FedNnUNetTrainer(nnUNetTrainer):
             
             # Save checkpoint
             torch.save(checkpoint, filename)
-            print(f"[Trainer] Saved {'best ' if is_best else ''}PyTorch checkpoint: {filename}")
-            print(f"[Trainer] Validation Dice: {validation_dice:.4f}")
+            print(f"[Trainer] Saved best PyTorch model: {filename}")
+            print(f"[Trainer] Best validation Dice: {validation_dice:.4f}")
+            print(f"[Trainer] Round: {round_num}")
             
             return str(filename)
         else:

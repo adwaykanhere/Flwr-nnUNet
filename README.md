@@ -375,6 +375,13 @@ nnUNet supports automatic mixed precision for faster GPU training:
 
 ## Recent Updates
 
+### v4.2 - Federated Logger Fix & Best Model Optimization
+- ✅ **Fixed Federated Logger Error**: Resolved "IndexError: list index out of range" in nnUNet logger during federated validation by properly initializing ema_fg_dice list
+- ✅ **Best Model Only Saving**: Optimized storage by saving only best performing models (both global and local) instead of all checkpoints
+- ✅ **Global Model Persistence**: Added server-side best global model saving in PyTorch `.pt` format to `global_models/global_best_model.pt`
+- ✅ **Improved Storage Efficiency**: Eliminated regular per-round checkpoint saving, keeping only best models with comprehensive metadata
+- ✅ **Enhanced Global Tracking**: Server now tracks best global validation scores across all federated rounds with proper aggregation
+
 ### v4.1 - Validation Fixes & Enhanced Model Saving
 - ✅ **Fixed Validation Data Loading**: Resolved "too many values to unpack (expected 3)" error by properly handling nnUNet's 4-tuple dataset return
 - ✅ **PyTorch Model Saving**: Implemented nnUNet-compatible .pth model checkpoints alongside existing .npz format

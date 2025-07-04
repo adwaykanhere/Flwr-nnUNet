@@ -302,21 +302,23 @@ class NnUNet3DFullresClient(NumPyClient):
                         self.best_round = federated_round
                         print(f"[Client {self.client_id}] New best validation Dice: {current_dice:.4f}")
                     
-                    # Save PyTorch checkpoint (both regular and best if improved)
-                    try:
-                        checkpoint_path = self.trainer.save_best_checkpoint_pytorch(
-                            output_dir=self.client_output_dir,
-                            round_num=federated_round,
-                            validation_dice=current_dice,
-                            is_best=is_best
-                        )
-                        if checkpoint_path:
-                            metrics["pytorch_checkpoint_saved"] = checkpoint_path
-                            if is_best:
+                    # Save PyTorch checkpoint only if it's the best model
+                    if is_best:
+                        try:
+                            checkpoint_path = self.trainer.save_best_checkpoint_pytorch(
+                                output_dir=self.client_output_dir,
+                                round_num=federated_round,
+                                validation_dice=current_dice,
+                                is_best=True
+                            )
+                            if checkpoint_path:
+                                metrics["pytorch_checkpoint_saved"] = checkpoint_path
                                 metrics["best_model_updated"] = True
                                 print(f"[Client {self.client_id}] Saved best model checkpoint: {checkpoint_path}")
-                    except Exception as save_e:
-                        print(f"[Client {self.client_id}] Failed to save PyTorch checkpoint: {save_e}")
+                        except Exception as save_e:
+                            print(f"[Client {self.client_id}] Failed to save PyTorch checkpoint: {save_e}")
+                    else:
+                        print(f"[Client {self.client_id}] Validation Dice ({current_dice:.4f}) <= best ({self.best_validation_dice:.4f}), not saving model")
                         
             except Exception as e:
                 print(f"[Client {self.client_id}] Validation failed: {e}")
