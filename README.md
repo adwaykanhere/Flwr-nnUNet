@@ -78,9 +78,9 @@ The implementation follows a 3-phase federated learning approach:
    pip install -r requirements.txt
    ```
 
-3. **Install nnU-Net v2**
+3. **Create a copy of nnU-Net v2**
    ```bash
-   # creat a copy of the source repo of nnUNet
+   # copy of the source repo of nnUNetv2
    git clone https://github.com/MIC-DKFZ/nnUNet.git
    ```
 
