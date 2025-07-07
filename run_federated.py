@@ -92,7 +92,7 @@ def validate_dataset(dataset_name: str, preproc_root: str) -> bool:
     
     return True
 
-print("=== Enhanced nnUNet Federated Learning ===")
+print("=== Flower based nnUNet Federated Learning ===")
 
 # Parse arguments
 args = parse_arguments()
@@ -101,7 +101,7 @@ args = parse_arguments()
 os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
 
 # Define paths
-preproc_root = '/mnt/c/Users/adway/Documents/nnUNet_preprocessed'
+preproc_root = '/Users/akanhere/Documents/nnUNet/nnUNet_preprocessed'
 
 # Handle list datasets option
 if args.list_datasets:

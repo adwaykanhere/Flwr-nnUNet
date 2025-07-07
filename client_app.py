@@ -96,6 +96,66 @@ class NnUNet3DFullresClient(NumPyClient):
             )
         return {}
 
+    def _extract_modality_info(self) -> dict:
+        """Extract modality information from dataset.json and fingerprint"""
+        modality_info = {}
+        
+        try:
+            # Load dataset.json to get channel names and modality info
+            with open(self.dataset_json_path, "r") as f:
+                dataset_dict = json.load(f)
+            
+            # Extract channel names
+            channel_names = dataset_dict.get("channel_names", {})
+            if channel_names:
+                modality_info["channel_names"] = channel_names
+                
+                # Infer primary modality from channel names
+                first_channel_key = list(channel_names.keys())[0] if channel_names else "0"
+                first_channel_name = channel_names.get(first_channel_key, "").lower()
+                
+                if 'ct' in first_channel_name or 'computed' in first_channel_name:
+                    modality_info["modality"] = "CT"
+                elif 'mr' in first_channel_name or 'magnetic' in first_channel_name or 't1' in first_channel_name or 't2' in first_channel_name:
+                    modality_info["modality"] = "MR"
+                elif 'pet' in first_channel_name:
+                    modality_info["modality"] = "PET"
+                elif 'us' in first_channel_name or 'ultrasound' in first_channel_name:
+                    modality_info["modality"] = "US"
+                else:
+                    modality_info["modality"] = "UNKNOWN"
+            
+            # Extract additional dataset metadata
+            modality_info["dataset_name"] = dataset_dict.get("name", "unknown")
+            modality_info["dataset_description"] = dataset_dict.get("description", "")
+            modality_info["num_training"] = dataset_dict.get("numTraining", 0)
+            modality_info["num_test"] = dataset_dict.get("numTest", 0)
+            
+            # Extract modality info from fingerprint if available
+            if self.local_fingerprint:
+                intensity_props = self.local_fingerprint.get("foreground_intensity_properties_per_channel", {})
+                if intensity_props:
+                    modality_info["intensity_channels"] = list(intensity_props.keys())
+                    
+                    # Get intensity statistics for the primary channel
+                    first_channel = list(intensity_props.keys())[0] if intensity_props else "0"
+                    if first_channel in intensity_props:
+                        channel_stats = intensity_props[first_channel]
+                        modality_info["intensity_stats"] = {
+                            "mean": channel_stats.get("mean", 0.0),
+                            "std": channel_stats.get("std", 0.0),
+                            "min": channel_stats.get("min", 0.0),
+                            "max": channel_stats.get("max", 0.0)
+                        }
+            
+            print(f"[Client {self.client_id}] Extracted modality info: {modality_info}")
+            
+        except Exception as exc:
+            print(f"[Client {self.client_id}] Error extracting modality info: {exc}")
+            modality_info = {"modality": "UNKNOWN"}
+        
+        return modality_info
+
     def _count_training_cases(self) -> int:
         """Return number of training cases listed in dataset.json."""
         try:
@@ -201,6 +261,9 @@ class NnUNet3DFullresClient(NumPyClient):
             # Get actual training count for preprocessing phase too
             actual_training_cases = self._get_actual_training_count()
             
+            # Extract modality information
+            modality_info = self._extract_modality_info()
+            
             metrics = {
                 "client_id": self.client_id,
                 "loss": 0.0,
@@ -209,6 +272,8 @@ class NnUNet3DFullresClient(NumPyClient):
                 "fingerprint_mean": fp_summary.get("mean_intensity", 0.0),
                 "actual_training_cases": actual_training_cases
             }
+            # Add modality information to metrics
+            metrics.update(modality_info)
             return initial_params, actual_training_cases, metrics
         
         # Handle initialization round (federated_round = -1) - apply global fingerprint
@@ -283,6 +348,11 @@ class NnUNet3DFullresClient(NumPyClient):
             "local_epochs_completed": local_epochs,
             "actual_training_cases": actual_training_cases
         }
+        
+        # Add modality information to training metrics if requested
+        if config.get("enable_modality_metadata", False):
+            modality_info = self._extract_modality_info()
+            metrics.update(modality_info)
         
         # Run validation if requested
         should_validate = config.get("validate", False)

@@ -24,16 +24,21 @@ The implementation follows a 3-phase federated learning approach:
 - ✅ **Configurable Paths**: User-friendly path configuration with environment variables and prompts
 - ✅ **Unified DataLoader**: Single dataloader handles both 2D and 3D cases automatically
 - ✅ **Enhanced CLI Interface**: Comprehensive command-line interface with run_federated.py script
+- ✅ **SuperNode/SuperLink Deployment**: Native Flower deployment engine support for distributed training
+- ✅ **Modality-Aware Aggregation**: Intelligent grouping and weighted aggregation based on imaging modality (CT, MR, PET, US)
+- ✅ **Multi-Modal Federation**: Supports heterogeneous medical imaging datasets with different modalities
 
 ## Architecture
 
 ### Components
 
 1. **`run_federated.py`**: Enhanced standalone script with comprehensive CLI for federated training
-2. **`server_app.py`**: Implements `NnUNetFederatedStrategy` for coordinating the federated learning process
-3. **`client_app.py`**: Handles client-side operations including fingerprint collection, local training, and model saving
-4. **`task.py`**: Custom `FedNnUNetTrainer` that extends nnU-Net's trainer for federated scenarios with validation and PyTorch model saving
-5. **`pyproject.toml`**: Flower app configuration and federation settings
+2. **`run_federated_deployment.py`**: SuperNode/SuperLink deployment script with modality-aware aggregation support
+3. **`server_app.py`**: Implements `NnUNetFederatedStrategy` for coordinating the federated learning process
+4. **`server_app_modality.py`**: Enhanced server with `ModalityAwareFederatedStrategy` for multi-modal aggregation
+5. **`client_app.py`**: Handles client-side operations including fingerprint collection, local training, modality detection, and model saving
+6. **`task.py`**: Custom `FedNnUNetTrainer` that extends nnU-Net's trainer for federated scenarios with validation and PyTorch model saving
+7. **`pyproject.toml`**: Flower app configuration and federation settings including deployment configurations
 
 ### Key Modifications
 
@@ -46,15 +51,20 @@ The implementation follows a 3-phase federated learning approach:
 - **Deep Supervision**: Properly handles nnUNet's multi-scale segmentation outputs
 - **Ray Compatibility**: Maintains compatibility with Ray distributed execution using single-threaded augmentation
 
-#### Federated Strategy (`server_app.py`)
+#### Federated Strategy (`server_app.py` & `server_app_modality.py`)
 - **Fingerprint Aggregation**: Merges dataset fingerprints from multiple clients using weighted averaging
 - **Parameter Distribution**: Handles global model initialization and updates
 - **Round Management**: Coordinates the multi-phase training process
+- **Modality-Aware Aggregation**: Groups clients by detected modality (CT, MR, PET, US) for improved aggregation
+- **Intra-Modal Aggregation**: First aggregates within modality groups
+- **Inter-Modal Aggregation**: Weighted combination of modality-specific models into global model
 
 #### Client Implementation (`client_app.py`)
 - **Phase-Aware Training**: Different behaviors for fingerprint, initialization, and training phases
 - **Local Model Management**: Handles model weights serialization/deserialization
 - **Metadata Exchange**: Shares dataset characteristics while preserving privacy
+- **Modality Detection**: Automatic extraction of imaging modality from dataset.json channel names
+- **Enhanced Metadata**: Transmits modality information and dataset characteristics to server
 
 ## Setup Instructions
 
@@ -159,7 +169,15 @@ The implementation follows a 3-phase federated learning approach:
    
    [tool.flwr.federations.local-simulation]
    options.num-supernodes = 2   # Number of simulated clients
+   
+   [tool.flwr.federations.supernode-deployment]
+   options.superlink-host = "127.0.0.1"      # SuperLink server address
+   options.superlink-port = 9091              # SuperLink server port  
+   options.num-supernodes = 2                 # Number of SuperNode clients
+   options.enable-modality-aggregation = false # Enable modality-aware aggregation
    ```
+
+📖 **For detailed deployment instructions, see [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md)**
 
 2. **Device Configuration** (`task.py`)
    ```python
@@ -177,7 +195,7 @@ The implementation follows a 3-phase federated learning approach:
 
 ### Running the Federated Training
 
-You can run federated training in two ways:
+You can run federated training in three ways:
 
 #### Option 1: Standalone Script (Recommended)
 
@@ -225,7 +243,69 @@ You can run federated training in two ways:
    python run_federated.py --dataset Dataset005_Prostate --clients 2 --rounds 5 --no-validate
    ```
 
-#### Option 2: Flower Simulation Framework
+#### Option 2: SuperNode/SuperLink Deployment (Production)
+
+The production-ready deployment using Flower's native deployment engines with modality-aware aggregation support.
+
+1. **Automated Full Deployment**
+   ```bash
+   # Basic deployment with modality-aware aggregation
+   python run_federated_deployment.py --mode run --clients 2 --rounds 3 \
+       --enable-modality-aggregation \
+       --modality-weights '{"CT": 0.6, "MR": 0.4}'
+   
+   # Advanced multi-modal setup
+   python run_federated_deployment.py --mode run \
+       --dataset Dataset005_Prostate \
+       --clients 4 --rounds 10 --local-epochs 3 \
+       --enable-modality-aggregation \
+       --modality-weights '{"CT": 0.4, "MR": 0.4, "PET": 0.2}' \
+       --validate --validation-frequency 2
+   ```
+
+2. **Manual Step-by-Step Deployment**
+   ```bash
+   # Terminal 1: Start SuperLink (Server)
+   python run_federated_deployment.py --mode superlink
+   
+   # Terminal 2-3: Start SuperNodes (Clients)
+   python run_federated_deployment.py --mode supernode --node-id 0 --partition-id 0
+   python run_federated_deployment.py --mode supernode --node-id 1 --partition-id 1
+   
+   # Terminal 1: Run Federation
+   flwr run . deployment
+   ```
+
+3. **Available Deployment Options**
+   ```bash
+   # Deployment configuration
+   --mode [superlink|supernode|run]         # Deployment mode
+   --superlink-host 127.0.0.1               # SuperLink server address
+   --superlink-port 9091                    # SuperLink server port
+   --insecure                               # Use insecure connection (for testing)
+   
+   # Modality-aware aggregation
+   --enable-modality-aggregation            # Enable modality-aware aggregation
+   --modality-weights '{"CT": 0.6, "MR": 0.4}'  # Custom modality weights
+   
+   # Multi-machine deployment
+   --superlink-host 192.168.1.100          # Remote SuperLink address
+   --node-id 0 --partition-id 0             # Unique client identifiers
+   ```
+
+4. **Modality Detection and Grouping**
+   The system automatically detects client modalities from dataset.json:
+   - **CT**: Channel names containing "ct", "computed"
+   - **MR**: Channel names containing "mr", "magnetic", "t1", "t2"  
+   - **PET**: Channel names containing "pet"
+   - **US**: Channel names containing "us", "ultrasound"
+
+5. **Aggregation Strategy**
+   - **Intra-modality**: CT clients aggregate → CT model, MR clients aggregate → MR model
+   - **Inter-modality**: Weighted combination of modality models → Global model
+   - **Fallback**: Traditional FedAvg when modality aggregation is disabled
+
+#### Option 3: Flower Simulation Framework
 
 1. **Start the Simulation**
    ```bash
@@ -233,11 +313,13 @@ You can run federated training in two ways:
    ```
 
 2. **Monitor Progress**
-   Both methods will output logs showing:
+   All methods will output logs showing:
    - Dataset loading and case discovery
    - Fingerprint collection from clients
+   - Modality detection and grouping (if enabled)
    - Training round progress with real loss values
    - Validation Dice scores (if enabled)
+   - Intra-modality and inter-modality aggregation results
    - Model aggregation results
    - PyTorch model saving (.pth files)
 
@@ -374,6 +456,19 @@ nnUNet supports automatic mixed precision for faster GPU training:
 5. **Simulation Speed**: Reduce `num-server-rounds` for faster testing
 
 ## Recent Updates
+
+### What's New in v7.0 - SuperNode/SuperLink Deployment & Modality-Aware Aggregation
+- ✅ **SuperNode/SuperLink Deployment**: Complete implementation of Flower's native deployment engines for production-ready federated learning
+- ✅ **Modality-Aware Aggregation**: Intelligent federated averaging that groups clients by imaging modality (CT, MR, PET, US) for improved model performance
+- ✅ **Automatic Modality Detection**: Extracts modality information from nnUNet dataset.json channel names and fingerprint data
+- ✅ **Intra-Modal Aggregation**: First aggregates within modality groups (CT clients → CT model, MR clients → MR model)
+- ✅ **Inter-Modal Aggregation**: Weighted combination of modality-specific models with configurable weights
+- ✅ **Enhanced Deployment Script**: New `run_federated_deployment.py` with comprehensive command-line interface for SuperNode/SuperLink deployment
+- ✅ **Production-Ready Federation**: Support for multi-machine deployment with configurable SuperLink host/port settings
+- ✅ **Modality-Aware Server**: Enhanced `server_app_modality.py` with `ModalityAwareFederatedStrategy` for multi-modal aggregation
+- ✅ **Enhanced Client Metadata**: Clients now transmit modality information and dataset characteristics for intelligent grouping
+- ✅ **Comprehensive Documentation**: Detailed deployment guide (`DEPLOYMENT_GUIDE.md`) with examples and troubleshooting
+- ✅ **Validation & Testing**: Complete test suite (`test_deployment.py`) to validate deployment setup and modality detection
 
 ### What's New in v6.2 - Federated Logger Fix & Best Model Optimization
 -  **Fixed Federated Logger Error**: Resolved "IndexError: list index out of range" in nnUNet logger during federated validation by properly initializing ema_fg_dice list

@@ -28,7 +28,7 @@ packages = ["."]
 publisher = "adwaykanhere"
 
 [tool.flwr.app.components]
-serverapp = "server_app:app"
+serverapp = "server_app_modality:app"
 clientapp = "client_app:app"
 
 [tool.flwr.app.config]
@@ -38,6 +38,13 @@ fraction-evaluate = 0.0
 
 [tool.flwr.federations]
 default = "local-simulation"
+deployment = "supernode-deployment"
 
 [tool.flwr.federations.local-simulation]
 options.num-supernodes = 1
+
+[tool.flwr.federations.supernode-deployment]
+options.superlink-host = "127.0.0.1"
+options.superlink-port = 9091
+options.num-supernodes = 2
+options.enable-modality-aggregation = false
