@@ -31,9 +31,13 @@ def parse_arguments():
     
     # Dataset selection
     parser.add_argument('--dataset', type=str, default='Dataset005_Prostate',
-                       help='Dataset name (e.g., Dataset005_Prostate, Dataset009_Spleen)')
+                       help='Dataset name (e.g., Dataset005_Prostate, Dataset009_Spleen) - used when all clients use same dataset')
     parser.add_argument('--list-datasets', action='store_true',
                        help='List available datasets and exit')
+    parser.add_argument('--client-datasets', type=str, default=None,
+                       help='JSON mapping of client IDs to datasets (e.g., \'{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen"}\')')
+    parser.add_argument('--validate-datasets', action='store_true', default=False,
+                       help='Validate dataset compatibility for multi-dataset federation')
     
     # Training configuration
     parser.add_argument('--clients', type=int, default=2,
@@ -113,6 +117,97 @@ def validate_dataset(dataset_name: str, preproc_root: str) -> bool:
             return False
     
     return True
+
+def parse_client_datasets(client_datasets_str: str) -> Dict[str, str]:
+    """Parse client-dataset mapping from JSON string"""
+    try:
+        client_datasets = json.loads(client_datasets_str)
+        # Ensure all keys are strings (client IDs)
+        return {str(k): str(v) for k, v in client_datasets.items()}
+    except json.JSONDecodeError as e:
+        print(f"❌ Error parsing client-datasets JSON: {e}")
+        return {}
+
+def validate_multi_dataset_setup(client_datasets: Dict[str, str], preproc_root: str) -> bool:
+    """Validate multi-dataset federation setup"""
+    print("🔍 Validating multi-dataset federation setup...")
+    
+    all_valid = True
+    unique_datasets = set(client_datasets.values())
+    
+    print(f"📊 Client-Dataset Mapping:")
+    for client_id, dataset_name in client_datasets.items():
+        print(f"  Client {client_id}: {dataset_name}")
+    
+    print(f"📈 Unique datasets: {len(unique_datasets)}")
+    print(f"🏥 Total clients: {len(client_datasets)}")
+    
+    # Validate each dataset
+    for client_id, dataset_name in client_datasets.items():
+        if not validate_dataset(dataset_name, preproc_root):
+            print(f"❌ Dataset '{dataset_name}' for client {client_id} is invalid or missing")
+            all_valid = False
+        else:
+            print(f"✅ Dataset '{dataset_name}' for client {client_id} is valid")
+    
+    if len(unique_datasets) > 1:
+        print("🔄 Multi-dataset federation detected")
+        try:
+            from dataset_compatibility import create_multi_dataset_config
+            config = create_multi_dataset_config(client_datasets, preproc_root)
+            
+            print("\n📋 Compatibility Analysis:")
+            compatibility = config.get('compatibility_analysis', {})
+            modality_analysis = compatibility.get('modality_analysis', {})
+            
+            if modality_analysis:
+                print(f"🧠 Detected modalities: {modality_analysis.get('unique_modalities', [])}")
+                print(f"🏷️  Modality distribution: {modality_analysis.get('modality_counts', {})}")
+            
+            recommendations = compatibility.get('recommendations', [])
+            if recommendations:
+                print("\n💡 Recommendations:")
+                for rec in recommendations:
+                    print(f"  {rec}")
+            
+            validation_report = config.get('validation_report', {})
+            if not validation_report.get('valid', True):
+                print("\n⚠️  Validation Issues:")
+                for error in validation_report.get('errors', []):
+                    print(f"  ❌ {error}")
+                for warning in validation_report.get('warnings', []):
+                    print(f"  ⚠️  {warning}")
+                all_valid = False
+            
+        except ImportError:
+            print("⚠️  Dataset compatibility analysis not available (dataset_compatibility.py not found)")
+        except Exception as e:
+            print(f"⚠️  Error during compatibility analysis: {e}")
+    
+    return all_valid
+
+def setup_multi_dataset_environment(client_datasets: Dict[str, str], args):
+    """Set up environment variables for multi-dataset federation"""
+    # Set the client-datasets mapping
+    os.environ['CLIENT_DATASETS'] = json.dumps(client_datasets)
+    
+    # If only one unique dataset, use it as the global dataset
+    unique_datasets = set(client_datasets.values())
+    if len(unique_datasets) == 1:
+        os.environ['TASK_NAME'] = list(unique_datasets)[0]
+        print(f"📊 Single dataset federation: {list(unique_datasets)[0]}")
+    else:
+        # Multi-dataset federation
+        print(f"🔄 Multi-dataset federation: {len(unique_datasets)} datasets across {len(client_datasets)} clients")
+        
+        # Automatically enable modality aggregation for multi-dataset setups
+        if not args.enable_modality_aggregation:
+            print("🧠 Automatically enabling modality-aware aggregation for multi-dataset federation")
+            args.enable_modality_aggregation = True
+    
+    # Set individual client environment variables as backup
+    for client_id, dataset_name in client_datasets.items():
+        os.environ[f'CLIENT_{client_id}_DATASET'] = dataset_name
 
 def setup_environment_variables(args):
     """Set up environment variables for federated learning"""
@@ -235,17 +330,48 @@ def main():
             print("  No datasets found in", preproc_root)
         return
     
-    # Validate selected dataset
-    if not validate_dataset(args.dataset, preproc_root):
-        available = list_available_datasets(preproc_root)
-        print(f"❌ Dataset '{args.dataset}' not found or invalid.")
-        print(f"Available datasets: {', '.join(available)}")
-        return
+    # Handle multi-dataset configuration
+    client_datasets = {}
+    if args.client_datasets:
+        # Multi-dataset federation
+        client_datasets = parse_client_datasets(args.client_datasets)
+        if not client_datasets:
+            print("❌ Invalid client-datasets configuration")
+            return
+        
+        # Validate multi-dataset setup
+        if not validate_multi_dataset_setup(client_datasets, preproc_root):
+            if not args.validate_datasets:
+                print("❌ Multi-dataset validation failed. Use --validate-datasets to see details.")
+                return
+        
+        # Set up multi-dataset environment
+        setup_multi_dataset_environment(client_datasets, args)
+        
+    else:
+        # Single dataset federation (traditional)
+        if not validate_dataset(args.dataset, preproc_root):
+            available = list_available_datasets(preproc_root)
+            print(f"❌ Dataset '{args.dataset}' not found or invalid.")
+            print(f"Available datasets: {', '.join(available)}")
+            return
+        
+        # Create single-dataset mapping for all clients
+        client_datasets = {str(i): args.dataset for i in range(args.clients)}
+        
+        # Set up environment variables
+        setup_environment_variables(args)
     
-    # Set up environment variables
-    setup_environment_variables(args)
+    # Display configuration
+    if args.client_datasets:
+        unique_datasets = set(client_datasets.values())
+        print(f"📊 Federation Type: Multi-Dataset ({len(unique_datasets)} datasets)")
+        print(f"🏥 Client-Dataset Mapping:")
+        for client_id, dataset_name in client_datasets.items():
+            print(f"   Client {client_id}: {dataset_name}")
+    else:
+        print(f"📊 Federation Type: Single-Dataset ({args.dataset})")
     
-    print(f"📊 Dataset: {args.dataset}")
     print(f"👥 Clients: {args.clients}")
     print(f"🔄 Rounds: {args.rounds}")
     print(f"📈 Local epochs: {args.local_epochs}")

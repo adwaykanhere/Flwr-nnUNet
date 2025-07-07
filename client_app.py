@@ -2,6 +2,7 @@
 
 import os
 import json
+from typing import Dict
 import flwr as fl
 from flwr.client import ClientApp, NumPyClient
 from flwr.common import Context, NDArrays
@@ -130,6 +131,15 @@ class NnUNet3DFullresClient(NumPyClient):
             modality_info["dataset_description"] = dataset_dict.get("description", "")
             modality_info["num_training"] = dataset_dict.get("numTraining", 0)
             modality_info["num_test"] = dataset_dict.get("numTest", 0)
+            
+            # Add dataset path information for multi-dataset federation
+            dataset_path_parts = self.dataset_json_path.split(os.sep)
+            for part in reversed(dataset_path_parts):
+                if part.startswith("Dataset"):
+                    modality_info["dataset_id"] = part
+                    break
+            else:
+                modality_info["dataset_id"] = "unknown"
             
             # Extract modality info from fingerprint if available
             if self.local_fingerprint:
@@ -415,18 +425,64 @@ class NnUNet3DFullresClient(NumPyClient):
         return val_loss, self.num_training_cases, {"val_loss": val_loss}
 
 
+def get_client_dataset_config(client_id: int, context: Context) -> Dict[str, str]:
+    """
+    Get dataset configuration for a specific client.
+    Supports both single-dataset and multi-dataset federation setups.
+    """
+    # Check for multi-dataset configuration first
+    client_datasets_json = os.environ.get("CLIENT_DATASETS")
+    if client_datasets_json:
+        try:
+            import json
+            client_datasets = json.loads(client_datasets_json)
+            client_key = str(client_id)
+            if client_key in client_datasets:
+                dataset_name = client_datasets[client_key]
+                print(f"[Client {client_id}] Using multi-dataset config: {dataset_name}")
+                return {"dataset_name": dataset_name, "source": "multi_dataset"}
+        except json.JSONDecodeError as e:
+            print(f"[Client {client_id}] Warning: Invalid CLIENT_DATASETS JSON: {e}")
+    
+    # Check for client-specific environment variable
+    client_task_env = f"CLIENT_{client_id}_DATASET"
+    client_dataset = os.environ.get(client_task_env)
+    if client_dataset:
+        print(f"[Client {client_id}] Using client-specific dataset: {client_dataset}")
+        return {"dataset_name": client_dataset, "source": "client_specific"}
+    
+    # Fallback to global TASK_NAME
+    task_name = os.environ.get("TASK_NAME", "Dataset005_Prostate")
+    print(f"[Client {client_id}] Using global dataset: {task_name}")
+    return {"dataset_name": task_name, "source": "global"}
+
 def client_fn(context: Context):
     """
     This callback is used by Flower 1.13 to create the client instance.
-    Typically you read environment variables or config to set up the trainer.
+    Supports multi-dataset federation with client-specific dataset assignment.
     """
     client_id = context.node_config.get("partition-id", 0)
+    
+    # Get dataset configuration for this client
+    dataset_config = get_client_dataset_config(client_id, context)
+    task_name = dataset_config["dataset_name"]
+    
+    print(f"[Client {client_id}] Initializing with dataset: {task_name}")
+    print(f"[Client {client_id}] Dataset source: {dataset_config['source']}")
 
-    task_name = os.environ.get("TASK_NAME", "Dataset005_Prostate") # Default to Dataset005_Prostate, change as needed
     preproc_root = get_nnunet_preprocessed_path()
     plans_path = os.path.join(preproc_root, task_name, "nnUNetPlans.json")
     dataset_json = os.path.join(preproc_root, task_name, "dataset.json")
     dataset_fp = os.path.join(preproc_root, task_name, "dataset_fingerprint.json")
+    
+    # Validate dataset paths
+    required_files = [plans_path, dataset_json]
+    missing_files = [f for f in required_files if not os.path.exists(f)]
+    if missing_files:
+        error_msg = f"[Client {client_id}] Missing required dataset files for {task_name}: {missing_files}"
+        print(error_msg)
+        raise FileNotFoundError(error_msg)
+    
     configuration = os.environ.get("NNUNET_CONFIG", "3d_fullres")
     out_root = os.environ.get("OUTPUT_ROOT", "/local/projects-t3/isaiahlab/nnunet_output")
     output_folder = os.path.join(out_root, f"client_{client_id}")

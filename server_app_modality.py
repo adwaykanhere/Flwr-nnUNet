@@ -37,7 +37,10 @@ class ModalityAwareFederatedStrategy(FedAvg):
         self.enable_modality_aggregation = enable_modality_aggregation
         self.modality_weights = modality_weights or {}
         self.client_modalities: Dict[str, str] = {}  # client_id -> modality
+        self.client_datasets: Dict[str, str] = {}  # client_id -> dataset
+        self.client_signatures: Dict[str, str] = {}  # client_id -> dataset_modality signature
         self.modality_groups: Dict[str, List[str]] = {}  # modality -> [client_ids]
+        self.dataset_modality_groups: Dict[str, List[str]] = {}  # dataset_modality -> [client_ids]
         
         # Best global model tracking
         self.best_global_validation_dice = 0.0
@@ -66,9 +69,19 @@ class ModalityAwareFederatedStrategy(FedAvg):
         # Try to infer from channel names if available
         if 'channel_names' in metrics:
             channel_names = metrics['channel_names']
-            if isinstance(channel_names, list) and len(channel_names) > 0:
-                # Common modality patterns
+            
+            # Handle both dict and list formats
+            if isinstance(channel_names, dict) and len(channel_names) > 0:
+                # Get first channel value from dict
+                first_channel = str(list(channel_names.values())[0]).lower()
+            elif isinstance(channel_names, list) and len(channel_names) > 0:
+                # Get first channel from list
                 first_channel = str(channel_names[0]).lower()
+            else:
+                first_channel = ""
+                
+            if first_channel:
+                # Common modality patterns
                 if 'ct' in first_channel or 'computed' in first_channel:
                     return 'CT'
                 elif 'mr' in first_channel or 'magnetic' in first_channel or 't1' in first_channel or 't2' in first_channel:
@@ -81,20 +94,54 @@ class ModalityAwareFederatedStrategy(FedAvg):
         # Default fallback
         return 'UNKNOWN'
 
-    def update_client_modality_mapping(self, client_id: str, metrics: Dict):
-        """Update the mapping of clients to their modalities"""
-        modality = self.extract_modality_from_metadata(metrics)
+    def extract_dataset_from_metadata(self, metrics: Dict) -> Optional[str]:
+        """Extract dataset information from client metrics"""
+        # Look for dataset information
+        dataset_keys = ['dataset_id', 'dataset_name']
         
+        for key in dataset_keys:
+            if key in metrics:
+                return str(metrics[key])
+        
+        # Default fallback
+        return 'UNKNOWN'
+
+    def create_client_signature(self, client_id: str, metrics: Dict) -> str:
+        """Create a unique signature for client based on dataset and modality"""
+        dataset = self.extract_dataset_from_metadata(metrics)
+        modality = self.extract_modality_from_metadata(metrics)
+        return f"{dataset}_{modality}"
+
+    def update_client_modality_mapping(self, client_id: str, metrics: Dict):
+        """Update the mapping of clients to their modalities and datasets"""
+        modality = self.extract_modality_from_metadata(metrics)
+        dataset = self.extract_dataset_from_metadata(metrics)
+        signature = self.create_client_signature(client_id, metrics)
+        
+        # Update mappings
         if modality != 'UNKNOWN':
             self.client_modalities[client_id] = modality
-            
-            # Update modality groups
-            if modality not in self.modality_groups:
-                self.modality_groups[modality] = []
-            
-            if client_id not in self.modality_groups[modality]:
-                self.modality_groups[modality].append(client_id)
-                print(f"[Server] Client {client_id} assigned to modality group: {modality}")
+        if dataset != 'UNKNOWN':
+            self.client_datasets[client_id] = dataset
+        
+        self.client_signatures[client_id] = signature
+        
+        # Update modality groups (traditional)
+        if modality not in self.modality_groups:
+            self.modality_groups[modality] = []
+        if client_id not in self.modality_groups[modality]:
+            self.modality_groups[modality].append(client_id)
+        
+        # Update dataset-modality groups (enhanced for multi-dataset)
+        if signature not in self.dataset_modality_groups:
+            self.dataset_modality_groups[signature] = []
+        if client_id not in self.dataset_modality_groups[signature]:
+            self.dataset_modality_groups[signature].append(client_id)
+        
+        print(f"[Server] Client {client_id} mapping updated:")
+        print(f"  Dataset: {dataset}")
+        print(f"  Modality: {modality}")
+        print(f"  Signature: {signature}")
 
     def aggregate_within_modality(self, 
                                   modality: str, 
@@ -143,6 +190,61 @@ class ModalityAwareFederatedStrategy(FedAvg):
               f"{total_examples} examples, avg_dice={avg_modality_dice:.4f}")
         
         return aggregated_params, modality_summary
+
+    def aggregate_within_dataset_modality(self, 
+                                          signature: str, 
+                                          client_results: List[Tuple[ClientProxy, FitRes]]) -> Tuple[NDArrays, Dict]:
+        """Aggregate parameters within a specific dataset-modality group (enhanced for multi-dataset)"""
+        print(f"[Server] Aggregating {len(client_results)} clients within dataset-modality group: {signature}")
+        
+        # Extract parameters and weights for this dataset-modality group
+        group_params_and_weights = []
+        total_examples = 0
+        group_metrics = []
+        
+        for client_proxy, fit_res in client_results:
+            client_id = str(fit_res.metrics.get("client_id", "unknown"))
+            client_signature = self.client_signatures.get(client_id, "UNKNOWN_UNKNOWN")
+            
+            if client_signature == signature:
+                parameters = parameters_to_ndarrays(fit_res.parameters)
+                num_examples = fit_res.num_examples
+                group_params_and_weights.append((parameters, num_examples))
+                total_examples += num_examples
+                group_metrics.append(fit_res.metrics)
+        
+        if not group_params_and_weights:
+            return None, {}
+        
+        # Perform weighted averaging within dataset-modality group
+        aggregated_params = self._weighted_average(group_params_and_weights)
+        
+        # Calculate group-specific metrics
+        group_validation_scores = []
+        for metrics in group_metrics:
+            validation_dice = metrics.get("validation_dice", {})
+            if isinstance(validation_dice, dict) and "mean" in validation_dice:
+                group_validation_scores.append(validation_dice["mean"])
+        
+        avg_group_dice = np.mean(group_validation_scores) if group_validation_scores else 0.0
+        
+        # Parse signature for display
+        dataset_part, modality_part = signature.split('_', 1) if '_' in signature else (signature, 'UNKNOWN')
+        
+        group_summary = {
+            'signature': signature,
+            'dataset': dataset_part,
+            'modality': modality_part,
+            'num_clients': len(group_params_and_weights),
+            'total_examples': total_examples,
+            'avg_validation_dice': avg_group_dice,
+            'validation_scores': group_validation_scores
+        }
+        
+        print(f"[Server] Dataset-Modality {signature}: {len(group_params_and_weights)} clients, "
+              f"{total_examples} examples, avg_dice={avg_group_dice:.4f}")
+        
+        return aggregated_params, group_summary
 
     def aggregate_across_modalities(self, 
                                     modality_results: Dict[str, Tuple[NDArrays, Dict]]) -> Tuple[NDArrays, Dict]:
@@ -199,6 +301,93 @@ class ModalityAwareFederatedStrategy(FedAvg):
         }
         
         print(f"[Server] Global aggregation: dice={global_avg_dice:.4f}, total_weight={total_weight:.2f}")
+        
+        return global_params, global_summary
+
+    def aggregate_multi_dataset_aware(self, 
+                                      client_results: List[Tuple[ClientProxy, FitRes]]) -> Tuple[NDArrays, Dict]:
+        """
+        Enhanced aggregation that handles multi-dataset federation.
+        First aggregates within dataset-modality groups, then across groups.
+        """
+        print(f"[Server] Performing multi-dataset aware aggregation...")
+        
+        # Group aggregation within dataset-modality signatures
+        dataset_modality_results = {}
+        
+        for signature in self.dataset_modality_groups.keys():
+            if len(self.dataset_modality_groups[signature]) > 0:
+                group_params, group_summary = self.aggregate_within_dataset_modality(signature, client_results)
+                if group_params is not None:
+                    dataset_modality_results[signature] = (group_params, group_summary)
+        
+        if not dataset_modality_results:
+            print("[Server] No valid dataset-modality groups found")
+            return None, {}
+        
+        print(f"[Server] Aggregating across {len(dataset_modality_results)} dataset-modality groups")
+        
+        # Aggregate across dataset-modality groups
+        inter_group_params_and_weights = []
+        total_weight = 0.0
+        aggregation_summary = {}
+        
+        for signature, (params, summary) in dataset_modality_results.items():
+            # Determine weight for this dataset-modality group
+            dataset = summary['dataset']
+            modality = summary['modality']
+            
+            # Check for specific dataset-modality weights first
+            weight_key = f"{dataset}_{modality}"
+            if self.modality_weights and weight_key in self.modality_weights:
+                group_weight = self.modality_weights[weight_key]
+            elif self.modality_weights and modality in self.modality_weights:
+                # Fall back to modality-only weights
+                group_weight = self.modality_weights[modality]
+            else:
+                # Use number of examples as weight
+                group_weight = summary['total_examples']
+            
+            inter_group_params_and_weights.append((params, group_weight))
+            total_weight += group_weight
+            
+            aggregation_summary[signature] = {
+                'weight': group_weight,
+                'dataset': dataset,
+                'modality': modality,
+                'num_clients': summary['num_clients'],
+                'total_examples': summary['total_examples'],
+                'avg_validation_dice': summary['avg_validation_dice']
+            }
+            
+            print(f"[Server] Group {signature}: weight={group_weight:.2f}, "
+                  f"dice={summary['avg_validation_dice']:.4f}")
+        
+        # Perform weighted averaging across dataset-modality groups
+        global_params = self._weighted_average(inter_group_params_and_weights)
+        
+        # Calculate global metrics
+        global_avg_dice = sum(
+            summary['avg_validation_dice'] * summary['weight'] 
+            for summary in aggregation_summary.values()
+        ) / total_weight if total_weight > 0 else 0.0
+        
+        global_summary = {
+            'global_avg_validation_dice': global_avg_dice,
+            'total_weight': total_weight,
+            'dataset_modality_breakdown': aggregation_summary,
+            'aggregation_method': 'multi_dataset_modality_aware',
+            'num_dataset_modality_groups': len(dataset_modality_results),
+            'unique_datasets': len(set(s['dataset'] for s in aggregation_summary.values())),
+            'unique_modalities': len(set(s['modality'] for s in aggregation_summary.values()))
+        }
+        
+        print(f"[Server] Multi-dataset aggregation complete:")
+        print(f"  Global Dice: {global_avg_dice:.4f}")
+        print(f"  Total weight: {total_weight:.2f}")
+        print(f"  Groups: {len(dataset_modality_results)}")
+        print(f"  Datasets: {global_summary['unique_datasets']}")
+        print(f"  Modalities: {global_summary['unique_modalities']}")
         
         return global_params, global_summary
 
@@ -292,6 +481,7 @@ class ModalityAwareFederatedStrategy(FedAvg):
                     
             print(f"[Server] Collected {len(results)}/{self.expected_num_clients} fingerprints")
             print(f"[Server] Detected modality groups: {dict(self.modality_groups)}")
+            print(f"[Server] Detected dataset-modality groups: {dict(self.dataset_modality_groups)}")
             
             return None, {}
 
@@ -327,10 +517,29 @@ class ModalityAwareFederatedStrategy(FedAvg):
                 else:
                     print(f"[Server] Client {client_id}: loss={loss:.4f}, epochs={epochs}")
             
-            # Perform aggregation
-            if self.enable_modality_aggregation and len(self.modality_groups) > 1:
-                # Modality-aware aggregation
-                print("[Server] Performing modality-aware aggregation...")
+            # Determine aggregation strategy
+            num_unique_datasets = len(set(self.client_datasets.values()))
+            num_unique_modalities = len(self.modality_groups)
+            num_dataset_modality_groups = len(self.dataset_modality_groups)
+            
+            print(f"[Server] Aggregation analysis:")
+            print(f"  Unique datasets: {num_unique_datasets}")
+            print(f"  Unique modalities: {num_unique_modalities}")
+            print(f"  Dataset-modality groups: {num_dataset_modality_groups}")
+            
+            # Choose aggregation strategy
+            if self.enable_modality_aggregation and num_unique_datasets > 1:
+                # Multi-dataset aware aggregation (most sophisticated)
+                print("[Server] Performing multi-dataset modality-aware aggregation...")
+                global_params, global_summary = self.aggregate_multi_dataset_aware(results)
+                if global_params is not None:
+                    aggregated_result = (ndarrays_to_parameters(global_params), global_summary)
+                else:
+                    aggregated_result = None
+                    
+            elif self.enable_modality_aggregation and num_unique_modalities > 1:
+                # Traditional modality-aware aggregation (single dataset, multiple modalities)
+                print("[Server] Performing single-dataset modality-aware aggregation...")
                 
                 # Aggregate within each modality
                 modality_results = {}

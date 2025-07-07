@@ -8,6 +8,9 @@ The deployment system consists of:
 - **SuperLink**: Central server that coordinates federated learning
 - **SuperNodes**: Client nodes that perform local training
 - **Modality-aware Aggregation**: Groups clients by imaging modality (CT, MR, etc.) for improved aggregation
+- **Multi-Dataset Federation**: Supports clients with different datasets for real-world hospital networks
+
+📚 **For multi-dataset scenarios, see the comprehensive [Multi-Dataset Federation Guide](MULTI_DATASET_GUIDE.md)**
 
 ## Quick Start
 
@@ -30,6 +33,14 @@ python run_federated_deployment.py --mode run \
     --clients 2 --rounds 5 --local-epochs 2 \
     --enable-modality-aggregation \
     --validate --validation-frequency 1
+
+# Multi-dataset federation (different datasets per client)
+python run_federated_deployment.py --mode run \
+    --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset027_ACDC"}' \
+    --clients 3 --rounds 10 --local-epochs 3 \
+    --enable-modality-aggregation \
+    --modality-weights '{"CT": 0.4, "MR": 0.6}' \
+    --validate
 ```
 
 ### Option 2: Manual Step-by-Step Deployment
@@ -71,10 +82,17 @@ flwr run . deployment
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--dataset` | `Dataset005_Prostate` | nnUNet dataset to use |
+| `--dataset` | `Dataset005_Prostate` | nnUNet dataset to use (single-dataset mode) |
 | `--clients` | `2` | Number of federated clients |
 | `--rounds` | `3` | Number of training rounds |
 | `--local-epochs` | `1` | Local epochs per client per round |
+
+### Multi-Dataset Configuration
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--client-datasets` | `None` | JSON mapping of client IDs to datasets |
+| `--validate-datasets` | `False` | Validate dataset compatibility |
 
 ### Deployment Configuration
 
