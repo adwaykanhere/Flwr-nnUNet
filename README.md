@@ -11,22 +11,22 @@ The implementation follows a 3-phase federated learning approach:
 
 ## Key Features
 
-- ✅ **Native nnUNet Integration**: Uses nnUNet's proven dataloaders, transforms, and training methods
-- ✅ **B2ND & NPZ Data Support**: Handles nnU-Net v2 preprocessed data in .b2nd and .npz formats with automatic detection
-- ✅ **Multi-Phase Federation**: Implements fingerprint collection, initialization, and training phases
-- ✅ **GPU & CPU Support**: Optimized for both GPU acceleration and CPU-only environments
-- ✅ **Deep Supervision**: Fully supports nnUNet's 6-level deep supervision architecture
-- ✅ **Cross-Validation Support**: Maintains nnU-Net's 5-fold cross-validation splits
-- ✅ **Any nnUNet Dataset**: Works with any nnUNet-compatible medical imaging dataset
-- ✅ **Real Training Execution**: Performs actual training with loss computation and parameter updates
-- ✅ **Validation & Model Saving**: Automatic validation with Dice score calculation and best model tracking
-- ✅ **PyTorch Model Checkpoints**: Saves models in nnUNet-compatible .pth format for inference
-- ✅ **Configurable Paths**: User-friendly path configuration with environment variables and prompts
-- ✅ **Unified DataLoader**: Single dataloader handles both 2D and 3D cases automatically
-- ✅ **Enhanced CLI Interface**: Comprehensive command-line interface with run_federated.py script
-- ✅ **SuperNode/SuperLink Deployment**: Native Flower deployment engine support for distributed training
-- ✅ **Modality-Aware Aggregation**: Intelligent grouping and weighted aggregation based on imaging modality (CT, MR, PET, US)
-- ✅ **Multi-Modal Federation**: Supports heterogeneous medical imaging datasets with different modalities
+-  **Native nnUNet Integration**: Uses nnUNet's proven dataloaders, transforms, and training methods
+-  **B2ND & NPZ Data Support**: Handles nnU-Net v2 preprocessed data in .b2nd and .npz formats with automatic detection
+-  **Multi-Phase Federation**: Implements fingerprint collection, initialization, and training phases
+-  **GPU & CPU Support**: Optimized for both GPU acceleration and CPU-only environments
+-  **Deep Supervision**: Fully supports nnUNet's 6-level deep supervision architecture
+-  **Cross-Validation Support**: Maintains nnU-Net's 5-fold cross-validation splits
+-  **Any nnUNet Dataset**: Works with any nnUNet-compatible medical imaging dataset
+-  **Real Training Execution**: Performs actual training with loss computation and parameter updates
+-  **Validation & Model Saving**: Automatic validation with Dice score calculation and best model tracking
+-  **PyTorch Model Checkpoints**: Saves models in nnUNet-compatible .pth format for inference
+-  **Configurable Paths**: User-friendly path configuration with environment variables and prompts
+-  **Unified DataLoader**: Single dataloader handles both 2D and 3D cases automatically
+-  **Enhanced CLI Interface**: Comprehensive command-line interface with run_federated.py script
+-  **SuperNode/SuperLink Deployment**: Native Flower deployment engine support for distributed training
+-  **Modality-Aware Aggregation**: Intelligent grouping and weighted aggregation based on imaging modality (CT, MR, PET, US)
+-  **Multi-Modal Federation**: Supports heterogeneous medical imaging datasets with different modalities
 
 ## Architecture
 
