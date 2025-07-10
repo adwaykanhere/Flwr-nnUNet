@@ -44,7 +44,7 @@ deployment = "supernode-deployment"
 options.num-supernodes = 1
 
 [tool.flwr.federations.supernode-deployment]
-options.superlink-host = "127.0.0.1"
-options.superlink-port = 9091
+address = "127.0.0.1:9093"
+insecure = true
 options.num-supernodes = 2
-options.enable-modality-aggregation = false
+options.enable-modality-aggregation = true

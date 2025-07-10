@@ -204,6 +204,7 @@ def setup_multi_dataset_environment(client_datasets: Dict[str, str], args):
         if not args.enable_modality_aggregation:
             print("🧠 Automatically enabling modality-aware aggregation for multi-dataset federation")
             args.enable_modality_aggregation = True
+            os.environ['ENABLE_MODALITY_AGGREGATION'] = 'true'
     
     # Set individual client environment variables as backup
     for client_id, dataset_name in client_datasets.items():
@@ -247,12 +248,8 @@ def start_superlink(args) -> subprocess.Popen:
     """Start the Flower SuperLink server"""
     cmd = [
         'flower-superlink',
-        '--host', args.superlink_host,
-        '--port', str(args.superlink_port)
+        '--insecure'
     ]
-    
-    if args.insecure:
-        cmd.append('--insecure')
     
     print(f"🚀 Starting SuperLink: {' '.join(cmd)}")
     return subprocess.Popen(cmd)
@@ -262,15 +259,16 @@ def start_supernode(args, node_id: int = None) -> subprocess.Popen:
     if node_id is None:
         node_id = args.node_id
         
+    # Use different ClientApp API addresses for each SuperNode
+    clientapp_port = 9094 + node_id
+    
     cmd = [
         'flower-supernode',
-        '--superlink', f'{args.superlink_host}:{args.superlink_port}',
-        '--node-config', f'partition-id={args.partition_id + node_id}',
-        '--client-app', 'client_app:app'
+        '--insecure',
+        '--superlink', f'{args.superlink_host}:9092',
+        '--clientappio-api-address', f'{args.superlink_host}:{clientapp_port}',
+        '--node-config', f'partition-id={args.partition_id + node_id}'
     ]
-    
-    if args.insecure:
-        cmd.append('--insecure')
     
     print(f"🔗 Starting SuperNode {node_id}: {' '.join(cmd)}")
     return subprocess.Popen(cmd, env=dict(os.environ, **{
@@ -316,8 +314,8 @@ def main():
     # Set GPU device
     os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
     
-    # Define paths
-    preproc_root = '/Users/akanhere/Documents/nnUNet/nnUNet_preprocessed'
+    # Define paths - get from environment variable or use fallback
+    preproc_root = os.environ.get('nnUNet_preprocessed', os.path.expanduser('~/nnUNet_preprocessed'))
     
     # Handle list datasets option
     if args.list_datasets:

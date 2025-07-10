@@ -96,7 +96,7 @@ The implementation follows a 3-phase federated learning approach:
 
 4. **Setup Data Paths**
    
-   Update the paths in your environment or modify the code to point to your preprocessed data:
+   Set the nnUNet preprocessed data environment variable:
    ```bash
    export nnUNet_preprocessed="/path/to/your/nnUNet_preprocessed"
    export nnUNet_raw="/path/to/your/nnUNet_raw"
@@ -171,10 +171,10 @@ The implementation follows a 3-phase federated learning approach:
    options.num-supernodes = 2   # Number of simulated clients
    
    [tool.flwr.federations.supernode-deployment]
-   options.superlink-host = "127.0.0.1"      # SuperLink server address
-   options.superlink-port = 9091              # SuperLink server port  
-   options.num-supernodes = 2                 # Number of SuperNode clients
-   options.enable-modality-aggregation = false # Enable modality-aware aggregation
+   address = "127.0.0.1:9093"                # SuperLink server address
+   insecure = true                           # Use insecure connection for testing
+   options.num-supernodes = 2                # Number of SuperNode clients
+   options.enable-modality-aggregation = true # Enable modality-aware aggregation
    ```
 
 📖 **For detailed deployment instructions, see [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md)**
@@ -197,23 +197,45 @@ The implementation follows a 3-phase federated learning approach:
 
 You can run federated training in three ways:
 
-#### Option 1: Standalone Script (Recommended)
+#### Option 1: Deployment Engine (Recommended)
 
-1. **Run the Enhanced Federated Script**
+1. **Activate Conda Environment**
    ```bash
-   python run_federated.py --dataset Dataset005_Prostate --clients 2 --rounds 3 --local-epochs 2 --validate
+   conda activate flwrtest  # or your preferred environment
    ```
 
-2. **Available Arguments**
+2. **Single Dataset Training**
+   ```bash
+   python run_federated_deployment.py --dataset Dataset005_Prostate --clients 2 --rounds 3 --local-epochs 2 --validate
+   ```
+
+3. **Multi-Dataset Training (with Modality-Aware Aggregation)**
+   ```bash
+   python run_federated_deployment.py --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen"}' --clients 2 --rounds 3 --enable-modality-aggregation
+   ```
+
+4. **Available Arguments**
    ```bash
    # Dataset selection
-   --dataset Dataset005_Prostate              # Specify dataset name
+   --dataset Dataset005_Prostate              # Single dataset for all clients
+   --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen"}' # Multi-dataset mapping
    --list-datasets                            # List available datasets
+   --validate-datasets                        # Validate multi-dataset compatibility
    
    # Training configuration  
    --clients 2                                # Number of federated clients
    --rounds 5                                 # Number of federated learning rounds
    --local-epochs 2                           # Local epochs per client per round
+   
+   # Modality-aware aggregation
+   --enable-modality-aggregation              # Enable modality-aware aggregation
+   --modality-weights '{"CT": 0.6, "MR": 0.4}' # Custom modality weights
+   
+   # Deployment configuration
+   --mode run                                 # Mode: superlink, supernode, or run (full deployment)
+   --superlink-host 127.0.0.1                # SuperLink host address
+   --superlink-port 9091                      # SuperLink port
+   --insecure                                 # Use insecure connection (for testing)
    
    # Validation options
    --validate                                 # Enable validation during training (default)
@@ -228,100 +250,96 @@ You can run federated training in three ways:
    --gpu 0                                    # GPU device ID to use
    ```
 
-3. **Example Commands**
+5. **Example Commands**
    ```bash
    # List available datasets
-   python run_federated.py --list-datasets
+   python run_federated_deployment.py --list-datasets
+   
+   # Validate multi-dataset compatibility
+   python run_federated_deployment.py --validate-datasets --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen"}'
    
    # Quick test run with minimal epochs
-   python run_federated.py --dataset Dataset005_Prostate --clients 2 --rounds 1 --local-epochs 1
+   python run_federated_deployment.py --dataset Dataset005_Prostate --clients 2 --rounds 1 --local-epochs 1
    
-   # Full training run with validation
-   python run_federated.py --dataset Dataset009_Spleen --clients 3 --rounds 10 --local-epochs 3 --validate
+   # Multi-dataset training with modality-aware aggregation
+   python run_federated_deployment.py --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset002_Heart"}' --clients 3 --rounds 5 --enable-modality-aggregation
    
    # Training without validation for speed
-   python run_federated.py --dataset Dataset005_Prostate --clients 2 --rounds 5 --no-validate
+   python run_federated_deployment.py --dataset Dataset005_Prostate --clients 2 --rounds 5 --no-validate
    ```
 
-#### Option 2: SuperNode/SuperLink Deployment (Production)
+#### Option 2: Standalone Script (Alternative)
 
-The production-ready deployment using Flower's native deployment engines with modality-aware aggregation support.
+The legacy simulation-based approach using Flower's local simulation.
 
-1. **Automated Full Deployment**
+1. **Run the Simulation Script**
    ```bash
-   # Basic deployment with modality-aware aggregation
-   python run_federated_deployment.py --mode run --clients 2 --rounds 3 \
-       --enable-modality-aggregation \
-       --modality-weights '{"CT": 0.6, "MR": 0.4}'
-   
-   # Advanced multi-modal setup
-   python run_federated_deployment.py --mode run \
-       --dataset Dataset005_Prostate \
-       --clients 4 --rounds 10 --local-epochs 3 \
-       --enable-modality-aggregation \
-       --modality-weights '{"CT": 0.4, "MR": 0.4, "PET": 0.2}' \
-       --validate --validation-frequency 2
+   python run_federated.py --dataset Dataset005_Prostate --clients 2 --rounds 3 --local-epochs 2 --validate
    ```
 
-2. **Manual Step-by-Step Deployment**
+#### Option 3: Flower Native Commands (Advanced)
+
+Manual step-by-step deployment using native Flower commands:
+
+1. **Start SuperLink (Terminal 1)**
    ```bash
-   # Terminal 1: Start SuperLink (Server)
-   python run_federated_deployment.py --mode superlink
+   flower-superlink --insecure
+   ```
+
+2. **Start SuperNodes (Terminal 2-3)**
+   ```bash
+   # Terminal 2: First SuperNode
+   flower-supernode --insecure --superlink 127.0.0.1:9092 --clientappio-api-address 127.0.0.1:9094 --node-config "partition-id=0"
    
-   # Terminal 2-3: Start SuperNodes (Clients)
-   python run_federated_deployment.py --mode supernode --node-id 0 --partition-id 0
-   python run_federated_deployment.py --mode supernode --node-id 1 --partition-id 1
-   
-   # Terminal 1: Run Federation
+   # Terminal 3: Second SuperNode
+   flower-supernode --insecure --superlink 127.0.0.1:9092 --clientappio-api-address 127.0.0.1:9095 --node-config "partition-id=1"
+   ```
+
+3. **Run Federation (Terminal 4)**
+   ```bash
    flwr run . deployment
    ```
 
-3. **Available Deployment Options**
+### Multi-Dataset Federation
+
+The deployment engine supports training across multiple datasets with automatic modality-aware aggregation:
+
+1. **Validate Dataset Compatibility**
    ```bash
-   # Deployment configuration
-   --mode [superlink|supernode|run]         # Deployment mode
-   --superlink-host 127.0.0.1               # SuperLink server address
-   --superlink-port 9091                    # SuperLink server port
-   --insecure                               # Use insecure connection (for testing)
-   
-   # Modality-aware aggregation
-   --enable-modality-aggregation            # Enable modality-aware aggregation
-   --modality-weights '{"CT": 0.6, "MR": 0.4}'  # Custom modality weights
-   
-   # Multi-machine deployment
-   --superlink-host 192.168.1.100          # Remote SuperLink address
-   --node-id 0 --partition-id 0             # Unique client identifiers
+   python run_federated_deployment.py --validate-datasets --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset002_Heart"}'
    ```
 
-4. **Modality Detection and Grouping**
-   The system automatically detects client modalities from dataset.json:
-   - **CT**: Channel names containing "ct", "computed"
-   - **MR**: Channel names containing "mr", "magnetic", "t1", "t2"  
-   - **PET**: Channel names containing "pet"
-   - **US**: Channel names containing "us", "ultrasound"
-
-5. **Aggregation Strategy**
-   - **Intra-modality**: CT clients aggregate → CT model, MR clients aggregate → MR model
-   - **Inter-modality**: Weighted combination of modality models → Global model
-   - **Fallback**: Traditional FedAvg when modality aggregation is disabled
-
-#### Option 3: Flower Simulation Framework
-
-1. **Start the Simulation**
+2. **Run Multi-Dataset Training**
    ```bash
-   flwr run .
+   python run_federated_deployment.py --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset002_Heart"}' --clients 3 --rounds 5 --enable-modality-aggregation
    ```
 
-2. **Monitor Progress**
-   All methods will output logs showing:
-   - Dataset loading and case discovery
-   - Fingerprint collection from clients
-   - Modality detection and grouping (if enabled)
-   - Training round progress with real loss values
-   - Validation Dice scores (if enabled)
-   - Intra-modality and inter-modality aggregation results
-   - Model aggregation results
-   - PyTorch model saving (.pth files)
+📖 **For detailed multi-dataset instructions, see [MULTI_DATASET_GUIDE.md](MULTI_DATASET_GUIDE.md)**
+
+## Training Output
+
+The system will output:
+- Dataset loading and case discovery
+- Fingerprint collection from clients
+- Modality detection and grouping (if enabled)
+- Training round progress with real loss values
+- Validation Dice scores (if enabled)
+- Intra-modality and inter-modality aggregation results
+- Model aggregation results
+- PyTorch model saving (.pth files)
+
+### Modality-Aware Aggregation
+
+The system automatically detects client modalities from dataset.json:
+- **CT**: Channel names containing "ct", "computed"
+- **MR**: Channel names containing "mr", "magnetic", "t1", "t2"  
+- **PET**: Channel names containing "pet"
+- **US**: Channel names containing "us", "ultrasound"
+
+**Aggregation Strategy**:
+- **Intra-modality**: CT clients aggregate → CT model, MR clients aggregate → MR model
+- **Inter-modality**: Weighted combination of modality models → Global model
+- **Fallback**: Traditional FedAvg when modality aggregation is disabled
 
 ## GPU Usage
 

@@ -436,13 +436,25 @@ def get_client_dataset_config(client_id: int, context: Context) -> Dict[str, str
         try:
             import json
             client_datasets = json.loads(client_datasets_json)
-            client_key = str(client_id)
-            if client_key in client_datasets:
-                dataset_name = client_datasets[client_key]
-                print(f"[Client {client_id}] Using multi-dataset config: {dataset_name}")
-                return {"dataset_name": dataset_name, "source": "multi_dataset"}
+            print(f"[Client {client_id}] Parsed CLIENT_DATASETS: {client_datasets}")
+            
+            # Ensure client_datasets is a dictionary
+            if not isinstance(client_datasets, dict):
+                print(f"[Client {client_id}] Warning: CLIENT_DATASETS is not a dictionary: {type(client_datasets)}")
+                print(f"[Client {client_id}] Raw value: {client_datasets}")
+            else:
+                client_key = str(client_id)
+                if client_key in client_datasets:
+                    dataset_name = client_datasets[client_key]
+                    print(f"[Client {client_id}] Using multi-dataset config: {dataset_name}")
+                    return {"dataset_name": dataset_name, "source": "multi_dataset"}
+                else:
+                    print(f"[Client {client_id}] Client key '{client_key}' not found in CLIENT_DATASETS")
+                    print(f"[Client {client_id}] Available keys: {list(client_datasets.keys())}")
         except json.JSONDecodeError as e:
             print(f"[Client {client_id}] Warning: Invalid CLIENT_DATASETS JSON: {e}")
+        except Exception as e:
+            print(f"[Client {client_id}] Error parsing CLIENT_DATASETS: {e}")
     
     # Check for client-specific environment variable
     client_task_env = f"CLIENT_{client_id}_DATASET"

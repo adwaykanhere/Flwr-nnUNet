@@ -58,10 +58,13 @@ Multi-dataset federation enables federated learning scenarios where:
 ### Basic Multi-Dataset Setup
 
 ```bash
+# Activate conda environment
+conda activate flwrtest
+
 # Simple 3-client setup with different datasets
-python run_federated_deployment.py --mode run \
-    --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset027_ACDC"}' \
-    --clients 3 --rounds 5 --local-epochs 3 \
+python run_federated_deployment.py \
+    --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset002_Heart"}' \
+    --clients 3 --rounds 5 --local-epochs 2 \
     --enable-modality-aggregation
 ```
 
@@ -69,8 +72,8 @@ python run_federated_deployment.py --mode run \
 
 ```bash
 # Advanced setup with custom modality weights
-python run_federated_deployment.py --mode run \
-    --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset027_ACDC"}' \
+python run_federated_deployment.py \
+    --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset002_Heart"}' \
     --clients 3 --rounds 10 --local-epochs 3 \
     --enable-modality-aggregation \
     --modality-weights '{"CT": 0.4, "MR": 0.6}' \
@@ -82,7 +85,7 @@ python run_federated_deployment.py --mode run \
 ```bash
 # Validate dataset compatibility before training
 python run_federated_deployment.py \
-    --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset027_ACDC"}' \
+    --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset002_Heart"}' \
     --validate-datasets
 ```
 
@@ -91,8 +94,8 @@ python run_federated_deployment.py \
 ### Method 1: Command Line JSON
 
 ```bash
-python run_federated_deployment.py --mode run \
-    --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset010_Colon"}' \
+python run_federated_deployment.py \
+    --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset002_Heart"}' \
     --enable-modality-aggregation
 ```
 
@@ -100,15 +103,15 @@ python run_federated_deployment.py --mode run \
 
 ```bash
 # Set client-dataset mapping
-export CLIENT_DATASETS='{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset027_ACDC"}'
+export CLIENT_DATASETS='{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset002_Heart"}'
 
 # Set individual client datasets (backup method)
 export CLIENT_0_DATASET="Dataset005_Prostate"
 export CLIENT_1_DATASET="Dataset009_Spleen"
-export CLIENT_2_DATASET="Dataset027_ACDC"
+export CLIENT_2_DATASET="Dataset002_Heart"
 
 # Run federation
-python run_federated_deployment.py --mode run --clients 3 --enable-modality-aggregation
+python run_federated_deployment.py --clients 3 --enable-modality-aggregation
 ```
 
 ### Method 3: YAML Configuration File
@@ -134,7 +137,7 @@ clients:
     validation_enabled: true
     gpu_id: 0
   - client_id: "2"
-    dataset: "Dataset027_ACDC"
+    dataset: "Dataset002_Heart"
     partition_id: 2
     local_epochs: 3
     validation_enabled: true
@@ -149,13 +152,13 @@ datasets:
   - name: "Dataset009_Spleen"
     path: "/path/to/nnUNet_preprocessed/Dataset009_Spleen"
     modality: "CT"
-    description: "Spleen segmentation (contrast-enhanced CT)"
+    description: "Spleen segmentation (CT)"
     priority: 1.0
-  - name: "Dataset027_ACDC"
-    path: "/path/to/nnUNet_preprocessed/Dataset027_ACDC"
+  - name: "Dataset002_Heart"
+    path: "/path/to/nnUNet_preprocessed/Dataset002_Heart"
     modality: "MR"
-    description: "Cardiac segmentation (MR cine)"
-    priority: 0.8
+    description: "Heart segmentation (MR cine)"
+    priority: 1.0
 
 aggregation:
   strategy: "multi_dataset"

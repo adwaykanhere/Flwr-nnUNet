@@ -19,27 +19,22 @@ The deployment system consists of:
 Run the complete federated learning setup automatically:
 
 ```bash
+# Activate conda environment
+conda activate flwrtest
+
 # Basic deployment with 2 clients
-python run_federated_deployment.py --mode run --clients 2 --rounds 3
+python run_federated_deployment.py --dataset Dataset005_Prostate --clients 2 --rounds 3
 
 # With modality-aware aggregation
-python run_federated_deployment.py --mode run --clients 2 --rounds 3 \
+python run_federated_deployment.py --dataset Dataset005_Prostate --clients 2 --rounds 3 \
     --enable-modality-aggregation \
     --modality-weights '{"CT": 0.6, "MR": 0.4}'
 
-# Specify dataset and validation
-python run_federated_deployment.py --mode run \
-    --dataset Dataset005_Prostate \
-    --clients 2 --rounds 5 --local-epochs 2 \
-    --enable-modality-aggregation \
-    --validate --validation-frequency 1
-
 # Multi-dataset federation (different datasets per client)
-python run_federated_deployment.py --mode run \
-    --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset027_ACDC"}' \
-    --clients 3 --rounds 10 --local-epochs 3 \
+python run_federated_deployment.py \
+    --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset002_Heart"}' \
+    --clients 3 --rounds 5 --local-epochs 2 \
     --enable-modality-aggregation \
-    --modality-weights '{"CT": 0.4, "MR": 0.6}' \
     --validate
 ```
 
@@ -49,24 +44,21 @@ python run_federated_deployment.py --mode run \
 
 ```bash
 # Terminal 1: Start the SuperLink server
-python run_federated_deployment.py --mode superlink
-
-# Or use Flower directly with modality-aware server
-flower-superlink --insecure --server-app server_app_modality:app
+flower-superlink --insecure
 ```
 
 #### Step 2: Start SuperNodes (Clients)
 
 ```bash
 # Terminal 2: Start first SuperNode (Client 0)
-python run_federated_deployment.py --mode supernode --node-id 0 --partition-id 0
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9094 \
+    --node-config "partition-id=0"
 
 # Terminal 3: Start second SuperNode (Client 1)  
-python run_federated_deployment.py --mode supernode --node-id 1 --partition-id 1
-
-# Or use Flower directly
-flower-supernode --insecure --superlink 127.0.0.1:9091 \
-    --node-config partition-id=0 --client-app client_app:app
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9095 \
+    --node-config "partition-id=1"
 ```
 
 #### Step 3: Run Federation
@@ -100,7 +92,7 @@ flwr run . deployment
 |-----------|---------|-------------|
 | `--mode` | `run` | Mode: `superlink`, `supernode`, or `run` |
 | `--superlink-host` | `127.0.0.1` | SuperLink server address |
-| `--superlink-port` | `9091` | SuperLink server port |
+| `--superlink-port` | `9092` | SuperLink server port |
 | `--node-id` | `0` | SuperNode identifier |
 | `--partition-id` | `0` | Client partition ID |
 | `--insecure` | `True` | Use insecure connection (for testing) |
@@ -130,6 +122,7 @@ flwr run . deployment
 Set these environment variables for consistent configuration:
 
 ```bash
+export nnUNet_preprocessed="/path/to/your/nnUNet_preprocessed"
 export TASK_NAME="Dataset005_Prostate"
 export NUM_CLIENTS=2
 export NUM_TRAINING_ROUNDS=3
