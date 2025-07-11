@@ -487,24 +487,24 @@ nnUNet supports automatic mixed precision for faster GPU training:
 ## Recent Updates
 
 ### What's New in v7.1 - Native Bash Deployment Script
-- ✅ **Native Bash Implementation**: Converted `run_federated_deployment.py` to `run_federated_deployment.sh` for native terminal process management
-- ✅ **Improved Process Control**: Direct bash process spawning and management instead of Python subprocess overhead
-- ✅ **Better Signal Handling**: Native bash signal trapping for graceful cleanup of SuperLink and SuperNode processes
-- ✅ **Terminal-Native Workflow**: Eliminates Python interpreter dependency for deployment commands
-- ✅ **Consistent CLI Interface**: Maintains all functionality while providing the expected terminal experience for distributed deployment
+-  **Native Bash Implementation**: Converted `run_federated_deployment.py` to `run_federated_deployment.sh` for native terminal process management
+-  **Improved Process Control**: Direct bash process spawning and management instead of Python subprocess overhead
+-  **Better Signal Handling**: Native bash signal trapping for graceful cleanup of SuperLink and SuperNode processes
+-  **Terminal-Native Workflow**: Eliminates Python interpreter dependency for deployment commands
+-  **Consistent CLI Interface**: Maintains all functionality while providing the expected terminal experience for distributed deployment
 
 ### What's New in v7.0 - SuperNode/SuperLink Deployment & Modality-Aware Aggregation
-- ✅ **SuperNode/SuperLink Deployment**: Complete implementation of Flower's native deployment engines for production-ready federated learning
-- ✅ **Modality-Aware Aggregation**: Intelligent federated averaging that groups clients by imaging modality (CT, MR, PET, US) for improved model performance
-- ✅ **Automatic Modality Detection**: Extracts modality information from nnUNet dataset.json channel names and fingerprint data
-- ✅ **Intra-Modal Aggregation**: First aggregates within modality groups (CT clients → CT model, MR clients → MR model)
-- ✅ **Inter-Modal Aggregation**: Weighted combination of modality-specific models with configurable weights
-- ✅ **Enhanced Deployment Script**: Comprehensive command-line interface for SuperNode/SuperLink deployment with native bash implementation
-- ✅ **Production-Ready Federation**: Support for multi-machine deployment with configurable SuperLink host/port settings
-- ✅ **Modality-Aware Server**: Enhanced `server_app_modality.py` with `ModalityAwareFederatedStrategy` for multi-modal aggregation
-- ✅ **Enhanced Client Metadata**: Clients now transmit modality information and dataset characteristics for intelligent grouping
-- ✅ **Comprehensive Documentation**: Detailed deployment guide (`DEPLOYMENT_GUIDE.md`) with examples and troubleshooting
-- ✅ **Validation & Testing**: Complete test suite (`test_deployment.py`) to validate deployment setup and modality detection
+-  **SuperNode/SuperLink Deployment**: Complete implementation of Flower's native deployment engines for production-ready federated learning
+-  **Modality-Aware Aggregation**: Intelligent federated averaging that groups clients by imaging modality (CT, MR, PET, US) for improved model performance
+-  **Automatic Modality Detection**: Extracts modality information from nnUNet dataset.json channel names and fingerprint data
+-  **Intra-Modal Aggregation**: First aggregates within modality groups (CT clients → CT model, MR clients → MR model)
+-  **Inter-Modal Aggregation**: Weighted combination of modality-specific models with configurable weights
+-  **Enhanced Deployment Script**: Comprehensive command-line interface for SuperNode/SuperLink deployment with native bash implementation
+-  **Production-Ready Federation**: Support for multi-machine deployment with configurable SuperLink host/port settings
+-  **Modality-Aware Server**: Enhanced `server_app_modality.py` with `ModalityAwareFederatedStrategy` for multi-modal aggregation
+-  **Enhanced Client Metadata**: Clients now transmit modality information and dataset characteristics for intelligent grouping
+-  **Comprehensive Documentation**: Detailed deployment guide (`DEPLOYMENT_GUIDE.md`) with examples and troubleshooting
+-  **Validation & Testing**: Complete test suite (`test_deployment.py`) to validate deployment setup and modality detection
 
 ### What's New in v6.2 - Federated Logger Fix & Best Model Optimization
 -  **Fixed Federated Logger Error**: Resolved "IndexError: list index out of range" in nnUNet logger during federated validation by properly initializing ema_fg_dice list
