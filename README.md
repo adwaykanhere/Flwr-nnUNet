@@ -86,6 +86,7 @@ The implementation follows a 3-phase federated learning approach:
 2. **Install Dependencies**
    ```bash
    conda create -n flwrtest python=3.10
+   conda activate flwrtest
    pip install -r requirements.txt
    ```
 
