@@ -33,7 +33,7 @@ The implementation follows a 3-phase federated learning approach:
 ### Components
 
 1. **`run_federated.py`**: Enhanced standalone script with comprehensive CLI for federated training
-2. **`run_federated_deployment.py`**: SuperNode/SuperLink deployment script with modality-aware aggregation support
+2. **`run_federated_deployment.sh`**: Native bash script for SuperNode/SuperLink deployment with modality-aware aggregation support
 3. **`server_app.py`**: Implements `NnUNetFederatedStrategy` for coordinating the federated learning process
 4. **`server_app_modality.py`**: Enhanced server with `ModalityAwareFederatedStrategy` for multi-modal aggregation
 5. **`client_app.py`**: Handles client-side operations including fingerprint collection, local training, modality detection, and model saving
@@ -197,7 +197,41 @@ The implementation follows a 3-phase federated learning approach:
 
 You can run federated training in three ways:
 
-#### Option 1: Deployment Engine (Recommended)
+#### Option 1: Manual Step-by-Step Deployment (Recommended)
+
+The native terminal approach using Flower's deployment commands directly:
+
+1. **Activate Conda Environment**
+   ```bash
+   conda activate flwrtest  # or your preferred environment
+   ```
+
+2. **Start SuperLink (Terminal 1)**
+   ```bash
+   flower-superlink --insecure
+   ```
+
+3. **Start SuperNodes (Terminal 2-3)**
+   ```bash
+   # Terminal 2: First SuperNode (Client 0)
+   flower-supernode --insecure --superlink 127.0.0.1:9092 \
+       --clientappio-api-address 127.0.0.1:9094 \
+       --node-config "partition-id=0"
+   
+   # Terminal 3: Second SuperNode (Client 1)
+   flower-supernode --insecure --superlink 127.0.0.1:9092 \
+       --clientappio-api-address 127.0.0.1:9095 \
+       --node-config "partition-id=1"
+   ```
+
+4. **Run Federation (Terminal 4)**
+   ```bash
+   flwr run . deployment
+   ```
+
+#### Option 2: Automated Deployment Script (Alternative)
+
+For convenience, use the bash script for automated deployment:
 
 1. **Activate Conda Environment**
    ```bash
@@ -206,12 +240,12 @@ You can run federated training in three ways:
 
 2. **Single Dataset Training**
    ```bash
-   python run_federated_deployment.py --dataset Dataset005_Prostate --clients 2 --rounds 3 --local-epochs 2 --validate
+   ./run_federated_deployment.sh --dataset Dataset005_Prostate --clients 2 --rounds 3 --local-epochs 2 --validate
    ```
 
 3. **Multi-Dataset Training (with Modality-Aware Aggregation)**
    ```bash
-   python run_federated_deployment.py --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen"}' --clients 2 --rounds 3 --enable-modality-aggregation
+   ./run_federated_deployment.sh --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen"}' --clients 2 --rounds 3 --enable-modality-aggregation
    ```
 
 4. **Available Arguments**
@@ -253,51 +287,28 @@ You can run federated training in three ways:
 5. **Example Commands**
    ```bash
    # List available datasets
-   python run_federated_deployment.py --list-datasets
+   ./run_federated_deployment.sh --list-datasets
    
    # Validate multi-dataset compatibility
-   python run_federated_deployment.py --validate-datasets --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen"}'
+   ./run_federated_deployment.sh --validate-datasets --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen"}'
    
    # Quick test run with minimal epochs
-   python run_federated_deployment.py --dataset Dataset005_Prostate --clients 2 --rounds 1 --local-epochs 1
+   ./run_federated_deployment.sh --dataset Dataset005_Prostate --clients 2 --rounds 1 --local-epochs 1
    
    # Multi-dataset training with modality-aware aggregation
-   python run_federated_deployment.py --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset002_Heart"}' --clients 3 --rounds 5 --enable-modality-aggregation
+   ./run_federated_deployment.sh --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset002_Heart"}' --clients 3 --rounds 5 --enable-modality-aggregation
    
    # Training without validation for speed
-   python run_federated_deployment.py --dataset Dataset005_Prostate --clients 2 --rounds 5 --no-validate
+   ./run_federated_deployment.sh --dataset Dataset005_Prostate --clients 2 --rounds 5 --no-validate
    ```
 
-#### Option 2: Standalone Script (Alternative)
+#### Option 3: Standalone Script (Legacy)
 
-The legacy simulation-based approach using Flower's local simulation.
+The legacy simulation-based approach using Flower's local simulation:
 
 1. **Run the Simulation Script**
    ```bash
    python run_federated.py --dataset Dataset005_Prostate --clients 2 --rounds 3 --local-epochs 2 --validate
-   ```
-
-#### Option 3: Flower Native Commands (Advanced)
-
-Manual step-by-step deployment using native Flower commands:
-
-1. **Start SuperLink (Terminal 1)**
-   ```bash
-   flower-superlink --insecure
-   ```
-
-2. **Start SuperNodes (Terminal 2-3)**
-   ```bash
-   # Terminal 2: First SuperNode
-   flower-supernode --insecure --superlink 127.0.0.1:9092 --clientappio-api-address 127.0.0.1:9094 --node-config "partition-id=0"
-   
-   # Terminal 3: Second SuperNode
-   flower-supernode --insecure --superlink 127.0.0.1:9092 --clientappio-api-address 127.0.0.1:9095 --node-config "partition-id=1"
-   ```
-
-3. **Run Federation (Terminal 4)**
-   ```bash
-   flwr run . deployment
    ```
 
 ### Multi-Dataset Federation
@@ -306,12 +317,12 @@ The deployment engine supports training across multiple datasets with automatic 
 
 1. **Validate Dataset Compatibility**
    ```bash
-   python run_federated_deployment.py --validate-datasets --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset002_Heart"}'
+   ./run_federated_deployment.sh --validate-datasets --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset002_Heart"}'
    ```
 
 2. **Run Multi-Dataset Training**
    ```bash
-   python run_federated_deployment.py --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset002_Heart"}' --clients 3 --rounds 5 --enable-modality-aggregation
+   ./run_federated_deployment.sh --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset002_Heart"}' --clients 3 --rounds 5 --enable-modality-aggregation
    ```
 
 📖 **For detailed multi-dataset instructions, see [MULTI_DATASET_GUIDE.md](MULTI_DATASET_GUIDE.md)**
@@ -475,13 +486,20 @@ nnUNet supports automatic mixed precision for faster GPU training:
 
 ## Recent Updates
 
+### What's New in v7.1 - Native Bash Deployment Script
+- ✅ **Native Bash Implementation**: Converted `run_federated_deployment.py` to `run_federated_deployment.sh` for native terminal process management
+- ✅ **Improved Process Control**: Direct bash process spawning and management instead of Python subprocess overhead
+- ✅ **Better Signal Handling**: Native bash signal trapping for graceful cleanup of SuperLink and SuperNode processes
+- ✅ **Terminal-Native Workflow**: Eliminates Python interpreter dependency for deployment commands
+- ✅ **Consistent CLI Interface**: Maintains all functionality while providing the expected terminal experience for distributed deployment
+
 ### What's New in v7.0 - SuperNode/SuperLink Deployment & Modality-Aware Aggregation
 - ✅ **SuperNode/SuperLink Deployment**: Complete implementation of Flower's native deployment engines for production-ready federated learning
 - ✅ **Modality-Aware Aggregation**: Intelligent federated averaging that groups clients by imaging modality (CT, MR, PET, US) for improved model performance
 - ✅ **Automatic Modality Detection**: Extracts modality information from nnUNet dataset.json channel names and fingerprint data
 - ✅ **Intra-Modal Aggregation**: First aggregates within modality groups (CT clients → CT model, MR clients → MR model)
 - ✅ **Inter-Modal Aggregation**: Weighted combination of modality-specific models with configurable weights
-- ✅ **Enhanced Deployment Script**: New `run_federated_deployment.py` with comprehensive command-line interface for SuperNode/SuperLink deployment
+- ✅ **Enhanced Deployment Script**: Comprehensive command-line interface for SuperNode/SuperLink deployment with native bash implementation
 - ✅ **Production-Ready Federation**: Support for multi-machine deployment with configurable SuperLink host/port settings
 - ✅ **Modality-Aware Server**: Enhanced `server_app_modality.py` with `ModalityAwareFederatedStrategy` for multi-modal aggregation
 - ✅ **Enhanced Client Metadata**: Clients now transmit modality information and dataset characteristics for intelligent grouping

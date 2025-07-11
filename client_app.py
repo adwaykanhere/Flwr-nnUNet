@@ -144,12 +144,12 @@ class NnUNet3DFullresClient(NumPyClient):
             # Extract modality info from fingerprint if available
             if self.local_fingerprint:
                 intensity_props = self.local_fingerprint.get("foreground_intensity_properties_per_channel", {})
-                if intensity_props:
+                if isinstance(intensity_props, dict) and intensity_props:
                     modality_info["intensity_channels"] = list(intensity_props.keys())
                     
                     # Get intensity statistics for the primary channel
-                    first_channel = list(intensity_props.keys())[0] if intensity_props else "0"
-                    if first_channel in intensity_props:
+                    first_channel = list(intensity_props.keys())[0]
+                    if first_channel in intensity_props and isinstance(intensity_props[first_channel], dict):
                         channel_stats = intensity_props[first_channel]
                         modality_info["intensity_stats"] = {
                             "mean": channel_stats.get("mean", 0.0),
@@ -264,9 +264,11 @@ class NnUNet3DFullresClient(NumPyClient):
                 fp_summary["num_cases"] = len(self.local_fingerprint.get("spacings", []))
                 # Get first modality stats if available
                 if "foreground_intensity_properties_per_channel" in self.local_fingerprint:
-                    first_mod = list(self.local_fingerprint["foreground_intensity_properties_per_channel"].keys())[0] if self.local_fingerprint["foreground_intensity_properties_per_channel"] else "0"
-                    if first_mod in self.local_fingerprint["foreground_intensity_properties_per_channel"]:
-                        fp_summary["mean_intensity"] = float(self.local_fingerprint["foreground_intensity_properties_per_channel"][first_mod].get("mean", 0.0))
+                    intensity_props = self.local_fingerprint["foreground_intensity_properties_per_channel"]
+                    if isinstance(intensity_props, dict) and intensity_props:
+                        first_mod = list(intensity_props.keys())[0]
+                        if first_mod in intensity_props and isinstance(intensity_props[first_mod], dict):
+                            fp_summary["mean_intensity"] = float(intensity_props[first_mod].get("mean", 0.0))
             
             # Get actual training count for preprocessing phase too
             actual_training_cases = self._get_actual_training_count()
@@ -473,7 +475,29 @@ def client_fn(context: Context):
     This callback is used by Flower 1.13 to create the client instance.
     Supports multi-dataset federation with client-specific dataset assignment.
     """
-    client_id = context.node_config.get("partition-id", 0)
+    # Handle node_config whether it's a string or dict
+    try:
+        if isinstance(context.node_config, dict):
+            # Standard dictionary access
+            client_id = context.node_config.get("partition-id", 0)
+        elif isinstance(context.node_config, str):
+            # Parse string format: "partition-id=0"
+            client_id = 0  # default
+            for pair in context.node_config.split():
+                if "=" in pair:
+                    key, value = pair.split("=", 1)
+                    if key.strip() == "partition-id":
+                        client_id = int(value.strip())
+                        break
+        else:
+            print(f"[Client] Warning: Unexpected node_config type: {type(context.node_config)}")
+            print(f"[Client] node_config value: {context.node_config}")
+            client_id = 0
+    except Exception as e:
+        print(f"[Client] Error parsing node_config: {e}")
+        print(f"[Client] node_config type: {type(context.node_config)}")
+        print(f"[Client] node_config value: {context.node_config}")
+        client_id = 0
     
     # Get dataset configuration for this client
     dataset_config = get_client_dataset_config(client_id, context)
