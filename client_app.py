@@ -49,9 +49,11 @@ class NnUNet3DFullresClient(NumPyClient):
         dataset_fingerprint: str | None = None,
         max_total_epochs: int = 50,
         local_epochs_per_round: int = 2,
+        fold: int = 0,
     ):
         super().__init__()
         self.client_id = client_id
+        print(f"[Client {client_id}] Initializing nnUNet trainer with fold {fold}")
         
         # Load JSON files
         import json
@@ -64,7 +66,7 @@ class NnUNet3DFullresClient(NumPyClient):
         self.trainer = FedNnUNetTrainer(
             plans=plans_dict,
             configuration=configuration,
-            fold=0,
+            fold=fold,
             dataset_json=dataset_dict,
             device=torch.device("cuda:0"),
         )
@@ -431,8 +433,27 @@ def get_client_dataset_config(client_id: int, context: Context) -> Dict[str, str
     """
     Get dataset configuration for a specific client.
     Supports both single-dataset and multi-dataset federation setups.
+    Now supports dataset-path and dataset-name from node-config with highest priority.
     """
-    # Check for multi-dataset configuration first
+    # Priority 1: Check for dataset-path in node-config (full path)
+    dataset_path = context.node_config.get("dataset-path") if hasattr(context, 'node_config') and context.node_config else None
+    if dataset_path:
+        # Extract dataset name from full path
+        import os
+        dataset_name = os.path.basename(dataset_path.rstrip('/'))
+        if dataset_name.startswith('Dataset'):
+            print(f"[Client {client_id}] Using dataset path from node-config: {dataset_path}")
+            return {"dataset_name": dataset_name, "source": "node_config_path", "dataset_path": dataset_path}
+        else:
+            print(f"[Client {client_id}] Warning: Invalid dataset path format in node-config: {dataset_path}")
+    
+    # Priority 2: Check for dataset-name in node-config
+    dataset_name = context.node_config.get("dataset-name") if hasattr(context, 'node_config') and context.node_config else None
+    if dataset_name:
+        print(f"[Client {client_id}] Using dataset name from node-config: {dataset_name}")
+        return {"dataset_name": dataset_name, "source": "node_config_name"}
+    
+    # Priority 3: Check for multi-dataset configuration from environment
     client_datasets_json = os.environ.get("CLIENT_DATASETS")
     if client_datasets_json:
         try:
@@ -506,10 +527,18 @@ def client_fn(context: Context):
     print(f"[Client {client_id}] Initializing with dataset: {task_name}")
     print(f"[Client {client_id}] Dataset source: {dataset_config['source']}")
 
-    preproc_root = get_nnunet_preprocessed_path()
-    plans_path = os.path.join(preproc_root, task_name, "nnUNetPlans.json")
-    dataset_json = os.path.join(preproc_root, task_name, "dataset.json")
-    dataset_fp = os.path.join(preproc_root, task_name, "dataset_fingerprint.json")
+    # Determine dataset path - use full path if provided, otherwise construct from preprocessed root
+    if "dataset_path" in dataset_config:
+        dataset_full_path = dataset_config["dataset_path"]
+        print(f"[Client {client_id}] Using explicit dataset path: {dataset_full_path}")
+    else:
+        preproc_root = get_nnunet_preprocessed_path()
+        dataset_full_path = os.path.join(preproc_root, task_name)
+        print(f"[Client {client_id}] Constructed dataset path: {dataset_full_path}")
+    
+    plans_path = os.path.join(dataset_full_path, "nnUNetPlans.json")
+    dataset_json = os.path.join(dataset_full_path, "dataset.json")
+    dataset_fp = os.path.join(dataset_full_path, "dataset_fingerprint.json")
     
     # Validate dataset paths
     required_files = [plans_path, dataset_json]
@@ -518,6 +547,15 @@ def client_fn(context: Context):
         error_msg = f"[Client {client_id}] Missing required dataset files for {task_name}: {missing_files}"
         print(error_msg)
         raise FileNotFoundError(error_msg)
+    
+    # Extract fold parameter from node-config (default to 0 for backward compatibility)
+    fold = context.node_config.get("fold", 0) if hasattr(context, 'node_config') and context.node_config else 0
+    try:
+        fold = int(fold)  # Ensure fold is an integer
+        print(f"[Client {client_id}] Using fold: {fold}")
+    except (ValueError, TypeError):
+        print(f"[Client {client_id}] Warning: Invalid fold value '{fold}', using default fold=0")
+        fold = 0
     
     configuration = os.environ.get("NNUNET_CONFIG", "3d_fullres")
     out_root = os.environ.get("OUTPUT_ROOT", "/local/projects-t3/isaiahlab/nnunet_output")
@@ -532,6 +570,7 @@ def client_fn(context: Context):
         dataset_fingerprint=dataset_fp,
         max_total_epochs=50,
         local_epochs_per_round=2,
+        fold=fold,
     ).to_client()
 
 

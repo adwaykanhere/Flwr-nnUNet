@@ -49,6 +49,7 @@ flower-superlink --insecure
 
 #### Step 2: Start SuperNodes (Clients)
 
+**Basic usage (uses environment variables for dataset):**
 ```bash
 # Terminal 2: Start first SuperNode (Client 0)
 flower-supernode --insecure --superlink 127.0.0.1:9092 \
@@ -59,6 +60,24 @@ flower-supernode --insecure --superlink 127.0.0.1:9092 \
 flower-supernode --insecure --superlink 127.0.0.1:9092 \
     --clientappio-api-address 127.0.0.1:9095 \
     --node-config "partition-id=1"
+```
+
+**Enhanced usage with dataset and fold specification:**
+```bash
+# Terminal 2: Start first SuperNode with specific dataset and fold
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9094 \
+    --node-config 'partition-id=0 dataset-name="Dataset005_Prostate" fold=0'
+
+# Terminal 3: Start second SuperNode with different fold
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9095 \
+    --node-config 'partition-id=1 dataset-name="Dataset005_Prostate" fold=1'
+
+# Terminal 4: Start third SuperNode with full dataset path
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9096 \
+    --node-config 'partition-id=2 dataset-path="/path/to/nnUNet_preprocessed/Dataset009_Spleen" fold=2'
 ```
 
 #### Step 3: Run Federation
@@ -130,6 +149,77 @@ export LOCAL_EPOCHS=2
 export ENABLE_MODALITY_AGGREGATION=true
 export MODALITY_WEIGHTS='{"CT": 0.6, "MR": 0.4}'
 export OUTPUT_DIR="federated_models"
+```
+
+## Node Configuration Parameters
+
+The `--node-config` parameter allows you to specify dataset and training configuration directly in the SuperNode command, providing maximum flexibility for manual deployments.
+
+### Supported Parameters
+
+| Parameter | Type | Description | Example |
+|-----------|------|-------------|---------|
+| `partition-id` | int | **Required**. Unique client identifier | `partition-id=0` |
+| `dataset-name` | string | Dataset name (overrides environment variables) | `dataset-name="Dataset005_Prostate"` |
+| `dataset-path` | string | Full path to dataset (highest priority) | `dataset-path="/path/to/nnUNet_preprocessed/Dataset005_Prostate"` |
+| `fold` | int | nnUNet cross-validation fold (0-4, default: 0) | `fold=1` |
+
+### Parameter Priority Order
+
+1. **`dataset-path`** - Full path specification (highest priority)
+2. **`dataset-name`** - Dataset name from node-config
+3. **Environment variables** - `CLIENT_DATASETS`, `CLIENT_{id}_DATASET`, `TASK_NAME`
+4. **Default fallback** - `Dataset005_Prostate`
+
+### Cross-Validation Folds Explained
+
+nnUNet uses **5-fold cross-validation** where each fold represents a different train/validation split:
+
+- **Fold 0**: ~80% train, ~20% validation (cases vary by split)
+- **Fold 1**: Different 80/20 split with different validation cases
+- **Fold 2-4**: Additional splits ensuring all data is used for validation
+
+**Benefits for Federated Learning:**
+- **Same Dataset, Different Folds**: Simulates different patient populations per institution
+- **Data Diversity**: Each client trains on different subsets, improving federation robustness
+- **Real-world Simulation**: Mimics how different hospitals have different patient cohorts
+
+### Usage Examples
+
+**Multi-Institution Simulation (Same Dataset, Different Folds):**
+```bash
+# Hospital A: Prostate dataset, fold 0
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9094 \
+    --node-config 'partition-id=0 dataset-name="Dataset005_Prostate" fold=0'
+
+# Hospital B: Prostate dataset, fold 1  
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9095 \
+    --node-config 'partition-id=1 dataset-name="Dataset005_Prostate" fold=1'
+
+# Hospital C: Prostate dataset, fold 2
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9096 \
+    --node-config 'partition-id=2 dataset-name="Dataset005_Prostate" fold=2'
+```
+
+**True Multi-Institution (Different Datasets):**
+```bash
+# Hospital A: Prostate dataset
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9094 \
+    --node-config 'partition-id=0 dataset-name="Dataset005_Prostate" fold=0'
+
+# Hospital B: Spleen dataset
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9095 \
+    --node-config 'partition-id=1 dataset-name="Dataset009_Spleen" fold=1'
+
+# Hospital C: Heart dataset with full path
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9096 \
+    --node-config 'partition-id=2 dataset-path="/custom/path/Dataset002_Heart" fold=2'
 ```
 
 ## Modality Detection
