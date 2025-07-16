@@ -457,6 +457,7 @@ def get_client_dataset_config(client_id: int, context: Context) -> Dict[str, str
         return {"dataset_name": dataset_name, "source": "node_config_name"}
     
     # Priority 3: Check for multi-dataset configuration from environment
+    import os
     client_datasets_json = os.environ.get("CLIENT_DATASETS")
     if client_datasets_json:
         try:
