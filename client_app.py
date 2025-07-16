@@ -100,7 +100,9 @@ class NnUNet3DFullresClient(NumPyClient):
         return {}
 
     def _extract_modality_info(self) -> dict:
-        """Extract modality information from dataset.json and fingerprint"""
+        """Extract modality information from dataset.json and fingerprint.
+        Returns only primitive types compatible with Flower's ConfigRecord validation.
+        """
         modality_info = {}
         
         try:
@@ -108,10 +110,11 @@ class NnUNet3DFullresClient(NumPyClient):
             with open(self.dataset_json_path, "r") as f:
                 dataset_dict = json.load(f)
             
-            # Extract channel names
+            # Extract channel names and flatten to string representation
             channel_names = dataset_dict.get("channel_names", {})
             if channel_names:
-                modality_info["channel_names"] = channel_names
+                # Convert channel_names dict to string representation for Flower compatibility
+                modality_info["channel_names_str"] = json.dumps(channel_names)
                 
                 # Infer primary modality from channel names
                 first_channel_key = list(channel_names.keys())[0] if channel_names else "0"
@@ -128,7 +131,7 @@ class NnUNet3DFullresClient(NumPyClient):
                 else:
                     modality_info["modality"] = "UNKNOWN"
             
-            # Extract additional dataset metadata
+            # Extract additional dataset metadata (already primitive types)
             modality_info["dataset_name"] = dataset_dict.get("name", "unknown")
             modality_info["dataset_description"] = dataset_dict.get("description", "")
             modality_info["num_training"] = dataset_dict.get("numTraining", 0)
@@ -147,18 +150,18 @@ class NnUNet3DFullresClient(NumPyClient):
             if self.local_fingerprint:
                 intensity_props = self.local_fingerprint.get("foreground_intensity_properties_per_channel", {})
                 if isinstance(intensity_props, dict) and intensity_props:
-                    modality_info["intensity_channels"] = list(intensity_props.keys())
+                    # Convert list to string for Flower compatibility
+                    modality_info["intensity_channels_str"] = json.dumps(list(intensity_props.keys()))
                     
-                    # Get intensity statistics for the primary channel
+                    # Get intensity statistics for the primary channel and flatten
                     first_channel = list(intensity_props.keys())[0]
                     if first_channel in intensity_props and isinstance(intensity_props[first_channel], dict):
                         channel_stats = intensity_props[first_channel]
-                        modality_info["intensity_stats"] = {
-                            "mean": channel_stats.get("mean", 0.0),
-                            "std": channel_stats.get("std", 0.0),
-                            "min": channel_stats.get("min", 0.0),
-                            "max": channel_stats.get("max", 0.0)
-                        }
+                        # Flatten intensity_stats dict to separate primitive fields
+                        modality_info["intensity_mean"] = float(channel_stats.get("mean", 0.0))
+                        modality_info["intensity_std"] = float(channel_stats.get("std", 0.0))
+                        modality_info["intensity_min"] = float(channel_stats.get("min", 0.0))
+                        modality_info["intensity_max"] = float(channel_stats.get("max", 0.0))
             
             print(f"[Client {self.client_id}] Extracted modality info: {modality_info}")
             
