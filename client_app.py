@@ -377,8 +377,18 @@ class NnUNet3DFullresClient(NumPyClient):
             try:
                 print(f"[Client {self.client_id}] Running validation...")
                 validation_results = self.trainer.run_validation_round()
-                metrics["validation_dice"] = validation_results
-                current_dice = validation_results.get('mean', 0)
+                
+                # Extract only primitive values for Flower compatibility
+                current_dice = validation_results.get('mean', 0.0)
+                metrics["validation_dice_mean"] = float(current_dice)
+                metrics["validation_num_batches"] = validation_results.get('num_batches', 0)
+                
+                # Flatten per_label scores to individual primitive fields
+                per_label_scores = validation_results.get('per_label', {})
+                for label, score in per_label_scores.items():
+                    if isinstance(score, (int, float)) and not np.isnan(score):
+                        metrics[f"validation_dice_label_{label}"] = float(score)
+                
                 print(f"[Client {self.client_id}] Validation Dice: {current_dice:.4f}")
                 
                 # Save PyTorch model if validation improved and output directory is set
