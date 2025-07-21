@@ -2,13 +2,6 @@
 
 This project implements a federated learning version of nnU-Net completely using the Flower framework. It enables distributed training of medical image segmentation models in a modality agnostic setting across multiple clients while keeping data decentralized and private.
 
-# Overview
-
-The implementation follows a 3-phase federated learning approach inspired from the Kaapana framework:
-- **Phase -2**: Fingerprint collection from all clients
-- **Phase -1**: Global initialization and parameter distribution  
-- **Phase 0+**: Federated training rounds with model aggregation
-
 ## Architecture
 
 ### Components
@@ -460,7 +453,7 @@ nnUNet supports automatic mixed precision for faster GPU training:
 When extending this implementation:
 
 1. **Maintain Privacy**: Ensure no raw data is transmitted between clients
-2. **Error Handling**: Add robust error handling for different data formats
+2. **Error Handling**: Add robust handling for different data formats
 3. **Testing**: Test with multiple datasets and cross-validation folds
 4. **Documentation**: Update this README with any new features or requirements
 
