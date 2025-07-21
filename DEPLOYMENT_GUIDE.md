@@ -102,7 +102,7 @@ flwr run . deployment
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
-| `OUTPUT_ROOT` | `/local/projects-t3/isaiahlab/nnunet_output` | Directory where models are saved |
+| `OUTPUT_ROOT` | `/local/pathto/nnunet_output` | Directory where models are saved |
 | `VALIDATE_MODELS` | `false` | Enable validation (required for model saving) |
 
 ### Modality-Aware Aggregation
