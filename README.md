@@ -2,7 +2,7 @@
 
 This project implements a federated learning version of nnU-Net completely using the Flower framework. It enables distributed training of medical image segmentation models in a modality agnostic setting across multiple clients while keeping data decentralized and private.
 
-## Overview
+# Overview
 
 The implementation follows a 3-phase federated learning approach inspired from the Kaapana framework:
 - **Phase -2**: Fingerprint collection from all clients
@@ -21,7 +21,7 @@ The implementation follows a 3-phase federated learning approach inspired from t
 6. **`task.py`**: Custom `FedNnUNetTrainer` that extends nnU-Net's trainer for federated scenarios with validation and PyTorch model saving
 7. **`pyproject.toml`**: Flower app configuration and federation settings including deployment configurations
 
-### Key Modifications
+### Key Features
 
 #### Native nnUNet Integration (`task.py`)
 - **Unified DataLoader**: Uses nnUNet's `nnUNetDataLoader` with automatic 2D/3D detection
@@ -32,7 +32,7 @@ The implementation follows a 3-phase federated learning approach inspired from t
 - **Deep Supervision**: Properly handles nnUNet's multi-scale segmentation outputs
 - **Ray Compatibility**: Maintains compatibility with Ray distributed execution using single-threaded augmentation
 
-#### Federated Strategy (`server_app.py` & `server_app_modality.py`)
+#### Depployment-Ready Federated Strategy (`server_app.py` & `server_app_modality.py`)
 - **Fingerprint Aggregation**: Merges dataset fingerprints from multiple clients using weighted averaging
 - **Parameter Distribution**: Handles global model initialization and updates
 - **Round Management**: Coordinates the multi-phase training process
@@ -40,7 +40,7 @@ The implementation follows a 3-phase federated learning approach inspired from t
 - **Intra-Modal Aggregation**: First aggregates within modality groups
 - **Inter-Modal Aggregation**: Weighted combination of modality-specific models into global model
 
-#### Client Implementation (`client_app.py`)
+#### Client-Side Modality-Agnostic Implementation (`client_app.py`)
 - **Phase-Aware Training**: Different behaviors for fingerprint, initialization, and training phases
 - **Local Model Management**: Handles model weights serialization/deserialization
 - **Metadata Exchange**: Shares dataset characteristics while preserving privacy
