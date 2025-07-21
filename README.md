@@ -180,7 +180,7 @@ The implementation follows a 3-phase federated learning approach inspired from t
 
 You can run federated training in three ways:
 
-#### Option 1: Manual Step-by-Step Deployment (Recommended)
+#### Option 1: Flower Deployment (Recommended)
 
 The native terminal approach using Flower's deployment commands directly:
 
@@ -295,18 +295,6 @@ The legacy simulation-based approach using Flower's local simulation:
    ```
 
 ### Multi-Dataset Federation
-
-The deployment engine supports training across multiple datasets with automatic modality-aware aggregation:
-
-1. **Validate Dataset Compatibility**
-   ```bash
-   ./run_federated_deployment.sh --validate-datasets --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset002_Heart"}'
-   ```
-
-2. **Run Multi-Dataset Training**
-   ```bash
-   ./run_federated_deployment.sh --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset002_Heart"}' --clients 3 --rounds 5 --enable-modality-aggregation
-   ```
 
 📖 **For detailed multi-dataset instructions, see [MULTI_DATASET_GUIDE.md](MULTI_DATASET_GUIDE.md)**
 
@@ -434,26 +422,6 @@ nnUNet supports automatic mixed precision for faster GPU training:
    - **Missing blosc2**: Install with `pip install blosc2`
    - **Corruption**: B2ND files may be corrupted, rerun preprocessing
    - **Version Mismatch**: Ensure nnUNet v2 latest version for B2ND support
-
-### Performance Optimization
-
-1. **GPU Acceleration**: For best performance, use GPU training:
-   ```python
-   device = torch.device("cuda")  
-   ```
-
-2. **CPU Optimization**: When using CPU, the system optimizes threading:
-   ```python
-   os.environ['OMP_NUM_THREADS'] = '1'
-   os.environ['MKL_NUM_THREADS'] = '1'
-   os.environ['NUMEXPR_NUM_THREADS'] = '1'
-   ```
-
-3. **Native nnUNet Pipeline**: Uses nnUNet's optimized training methods for maximum efficiency
-
-4. **Memory Usage**: Properties are cached to reduce I/O overhead during training
-
-5. **Simulation Speed**: Reduce `num-server-rounds` for faster testing
 
 ## Technical Details
 
