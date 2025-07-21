@@ -63,6 +63,10 @@ Multi-dataset federation enables federated learning scenarios where:
 # Activate conda environment
 conda activate flwrtest
 
+# Set model saving configuration (REQUIRED)
+export OUTPUT_ROOT="/path/to/multi_dataset_models"  # Where to save models
+export VALIDATE_MODELS=true                        # Enable validation for model saving
+
 # Set multi-dataset configuration
 export CLIENT_DATASETS='{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset002_Heart"}'
 export ENABLE_MODALITY_AGGREGATION=true
@@ -107,6 +111,10 @@ flwr run . deployment
 ### Method 1: Environment Variables with Node Config
 
 ```bash
+# Set model saving configuration (REQUIRED)
+export OUTPUT_ROOT="/path/to/multi_dataset_models"
+export VALIDATE_MODELS=true
+
 # Set multi-dataset configuration
 export CLIENT_DATASETS='{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset002_Heart"}'
 export ENABLE_MODALITY_AGGREGATION=true
@@ -217,6 +225,10 @@ flwr run . deployment  # After all SuperNodes are running
 **Scenario**: 4 hospitals with different imaging capabilities
 
 ```bash
+# Set model saving configuration
+export OUTPUT_ROOT="/path/to/multi_modal_hospital_models"
+export VALIDATE_MODELS=true
+
 # Set environment variables
 export CLIENT_DATASETS='{
     "0": "Dataset005_Prostate",
@@ -269,6 +281,10 @@ flwr run . deployment
 **Scenario**: Different departments specializing in different body parts
 
 ```bash
+# Set model saving configuration
+export OUTPUT_ROOT="/path/to/radiology_dept_models"
+export VALIDATE_MODELS=true
+
 # Set environment variables for department specialization
 export CLIENT_DATASETS='{
     "0": "Dataset005_Prostate",
@@ -312,6 +328,10 @@ flwr run . deployment  # Terminal 7
 **Scenario**: Training on Institution A data, validating on Institution B data
 
 ```bash
+# Set model saving configuration
+export OUTPUT_ROOT="/path/to/cross_institutional_models"
+export VALIDATE_MODELS=true
+
 # Set cross-institutional environment
 export CLIENT_DATASETS='{
     "0": "Dataset005_Prostate",
@@ -321,7 +341,6 @@ export CLIENT_DATASETS='{
 }'
 export ENABLE_MODALITY_AGGREGATION=true
 export MODALITY_WEIGHTS='{"CT": 0.5, "MR": 0.5}'
-export OUTPUT_DIR="cross_institutional_models"
 
 # Start SuperLink
 flower-superlink --insecure  # Terminal 1
@@ -497,13 +516,45 @@ ls /path/to/nnUNet_preprocessed/Dataset009_Spleen/dataset.json
 **Solution**:
 ```bash
 # Reduce local epochs
---local-epochs 1
+export LOCAL_EPOCHS=1
 
 # Reduce validation frequency  
---validation-frequency 5
+export VALIDATION_FREQUENCY=5
 
 # Use CPU training for testing
 export CUDA_VISIBLE_DEVICES=""
+```
+
+#### 5. Models Not Being Saved in Multi-Dataset Setup
+
+```
+❌ Models not found in output directory after training
+```
+
+**Solution**:
+```bash
+# Check if OUTPUT_ROOT is set
+echo $OUTPUT_ROOT
+
+# Set OUTPUT_ROOT if missing
+export OUTPUT_ROOT="/path/to/multi_dataset_models"
+
+# Ensure validation is enabled (required for model saving)
+export VALIDATE_MODELS=true
+
+# Check directory structure after training
+ls -la $OUTPUT_ROOT/client_*/model_best.pt
+
+# Expected multi-dataset model structure:
+# /path/to/multi_dataset_models/
+# ├── client_0/  (Dataset005_Prostate)
+# │   └── model_best.pt
+# ├── client_1/  (Dataset009_Spleen)  
+# │   └── model_best.pt
+# ├── client_2/  (Dataset002_Heart)
+# │   └── model_best.pt
+# └── global_models/
+#     └── global_best_model_modality_aware.pt
 ```
 
 ### Debugging Tips
@@ -511,6 +562,10 @@ export CUDA_VISIBLE_DEVICES=""
 #### Enable Detailed Logging
 
 ```bash
+# Set model saving for debugging
+export OUTPUT_ROOT="/path/to/debug_models"
+export VALIDATE_MODELS=true
+
 # Add debugging to environment
 export PYTHONPATH="${PYTHONPATH}:."
 export CUDA_LAUNCH_BLOCKING=1

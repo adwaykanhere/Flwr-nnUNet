@@ -576,7 +576,7 @@ def client_fn(context: Context):
     output_folder = os.path.join(out_root, f"client_{client_id}")
 
     # Create the client
-    return NnUNet3DFullresClient(
+    client = NnUNet3DFullresClient(
         client_id=client_id,
         plans_path=plans_path,
         dataset_json=dataset_json,
@@ -585,7 +585,13 @@ def client_fn(context: Context):
         max_total_epochs=50,
         local_epochs_per_round=2,
         fold=fold,
-    ).to_client()
+    )
+    
+    # Set output directory for model saving
+    client.set_output_directory(out_root)
+    print(f"[Client {client_id}] Model saving enabled to: {out_root}")
+    
+    return client.to_client()
 
 
 # Flower 1.13+ recommended usage: a ClientApp

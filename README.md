@@ -430,7 +430,14 @@ nnUNet supports automatic mixed precision for faster GPU training:
    - **Permissions**: Ensure read access to the nnUNet_preprocessed directory
    - **Dataset Name**: Verify `TASK_NAME` environment variable matches your dataset folder
 
-6. **B2ND Format Issues**
+6. **Models Not Being Saved**
+   - **Missing OUTPUT_ROOT**: Set `export OUTPUT_ROOT="/path/to/federated_models"`
+   - **Validation Disabled**: Models are only saved during validation - ensure validation is enabled
+   - **Directory Permissions**: Check write permissions for the output directory
+   - **Verification**: After training, check for `.pt` files in `OUTPUT_ROOT/client_X/` directories
+   - **Default Path**: If not set, defaults to `/local/projects-t3/isaiahlab/nnunet_output`
+
+7. **B2ND Format Issues**
    - **Missing blosc2**: Install with `pip install blosc2`
    - **Corruption**: B2ND files may be corrupted, rerun preprocessing
    - **Version Mismatch**: Ensure nnUNet v2 latest version for B2ND support

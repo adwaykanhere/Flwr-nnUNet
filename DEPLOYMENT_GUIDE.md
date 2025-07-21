@@ -40,14 +40,22 @@ python run_federated_deployment.py \
 
 ### Option 2: Manual Step-by-Step Deployment
 
-#### Step 1: Start SuperLink (Server)
+#### Step 1: Set Environment Variables for Model Saving
+
+```bash
+# Set model saving configuration (REQUIRED for saving models)
+export OUTPUT_ROOT="/path/to/federated_models"  # Where to save trained models
+export VALIDATE_MODELS=true                     # Enable validation for model saving
+```
+
+#### Step 2: Start SuperLink (Server)
 
 ```bash
 # Terminal 1: Start the SuperLink server
 flower-superlink --insecure
 ```
 
-#### Step 2: Start SuperNodes (Clients)
+#### Step 3: Start SuperNodes (Clients)
 
 **Basic usage (uses environment variables for dataset):**
 ```bash
@@ -80,7 +88,7 @@ flower-supernode --insecure --superlink 127.0.0.1:9092 \
     --node-config 'partition-id=2 dataset-path="/path/to/nnUNet_preprocessed/Dataset009_Spleen" fold=2'
 ```
 
-#### Step 3: Run Federation
+#### Step 4: Run Federation
 
 ```bash
 # Terminal 4: Start the federated learning
@@ -116,6 +124,13 @@ flwr run . deployment
 | `--partition-id` | `0` | Client ID |
 | `--insecure` | `True` | Use insecure connection (for testing) |
 
+### Model Saving Configuration
+
+| Environment Variable | Default | Description |
+|---------------------|---------|-------------|
+| `OUTPUT_ROOT` | `/local/projects-t3/isaiahlab/nnunet_output` | Directory where models are saved |
+| `VALIDATE_MODELS` | `false` | Enable validation (required for model saving) |
+
 ### Modality-Aware Aggregation
 
 | Parameter | Default | Description |
@@ -143,12 +158,13 @@ Set these environment variables for consistent configuration:
 ```bash
 export nnUNet_preprocessed="/path/to/your/nnUNet_preprocessed"
 export TASK_NAME="Dataset005_Prostate"
+export OUTPUT_ROOT="/path/to/federated_models"  # REQUIRED for model saving
 export NUM_CLIENTS=2
 export NUM_TRAINING_ROUNDS=3
 export LOCAL_EPOCHS=2
 export ENABLE_MODALITY_AGGREGATION=true
 export MODALITY_WEIGHTS='{"CT": 0.6, "MR": 0.4}'
-export OUTPUT_DIR="federated_models"
+export VALIDATE_MODELS=true                     # Enable validation for model saving
 ```
 
 ## Node Configuration Parameters
@@ -257,18 +273,39 @@ The federated learning process consists of:
 
 ## Output and Model Saving
 
-Models are saved to the specified output directory:
+### Model Output Structure
+
+Models are saved to the directory specified by `OUTPUT_ROOT`:
 
 ```
-federated_models/
-├── Dataset005_Prostate/
-│   ├── server/
-│   │   ├── global_best_model_modality_aware.pt
-│   │   └── round_X_metadata.json
-│   ├── client_0/
-│   │   └── model_best.pt
-│   └── client_1/
-│       └── model_best.pt
+/path/to/federated_models/
+├── client_0/
+│   └── model_best.pt              # Best model from client 0
+├── client_1/
+│   └── model_best.pt              # Best model from client 1
+├── client_2/
+│   └── model_best.pt              # Best model from client 2 (if applicable)
+└── global_models/
+    ├── global_best_model_modality_aware.pt  # Global aggregated model
+    └── round_X_metadata.json               # Training metadata
+```
+
+### Model Saving Requirements
+
+⚠️ **Important**: Models are only saved when the following conditions are met:
+1. `OUTPUT_ROOT` environment variable is set
+2. Validation is enabled (models save when validation improves)
+3. Client achieves better validation performance than previous rounds
+
+### Verifying Model Saving
+
+After training completes, verify models were saved:
+```bash
+# Check if models were created
+ls -la $OUTPUT_ROOT/client_*/model_best.pt
+
+# Check model file sizes (should be >100MB for medical models)
+du -sh $OUTPUT_ROOT/client_*/model_best.pt
 ```
 
 ## Example Commands
@@ -337,6 +374,13 @@ flwr run . deployment
    - Reduce batch size or local epochs
    - Monitor GPU memory usage
    - Use gradient checkpointing if available
+
+5. **Models Not Being Saved**
+   - **Missing OUTPUT_ROOT**: Ensure `export OUTPUT_ROOT="/path/to/federated_models"`
+   - **Validation Disabled**: Models only save during validation rounds with improvement
+   - **Permissions**: Check write permissions: `mkdir -p $OUTPUT_ROOT && touch $OUTPUT_ROOT/test.txt`
+   - **No Validation Improvement**: Models only save when validation Dice score improves
+   - **Check Logs**: Look for "Saved best model checkpoint" in client logs
 
 ### Validation
 
