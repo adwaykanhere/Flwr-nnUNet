@@ -126,9 +126,7 @@ This project implements a federated learning version of nnU-Net completely using
    options.num-supernodes = 2                # Number of SuperNode clients
    options.enable-modality-aggregation = true # Enable modality-aware aggregation
    ```
-
-📖 **For detailed deployment instructions, see [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md)**
-
+   
 2. **Device Configuration** (`task.py`)
    ```python
    # For CPU-only training (default, Ray-compatible):
@@ -178,6 +176,7 @@ The native terminal approach using Flower's deployment commands directly:
    ```bash
    flwr run . deployment
    ```
+📖 **For detailed deployment instructions, see [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md)**
 
 #### Option 2: Automated Deployment Script (Alternative)
 
