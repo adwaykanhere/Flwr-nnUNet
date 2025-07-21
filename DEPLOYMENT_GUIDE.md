@@ -113,7 +113,7 @@ flwr run . deployment
 | `--superlink-host` | `127.0.0.1` | SuperLink server address |
 | `--superlink-port` | `9092` | SuperLink server port |
 | `--node-id` | `0` | SuperNode identifier |
-| `--partition-id` | `0` | Client partition ID |
+| `--partition-id` | `0` | Client ID |
 | `--insecure` | `True` | Use insecure connection (for testing) |
 
 ### Modality-Aware Aggregation
