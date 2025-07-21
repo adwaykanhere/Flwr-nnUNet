@@ -14,32 +14,6 @@ The deployment system consists of:
 
 ## Quick Start
 
-### Option 1: Automated Full Deployment
-
-Run the complete federated learning setup automatically:
-
-```bash
-# Activate conda environment
-conda activate flwrtest
-
-# Basic deployment with 2 clients
-python run_federated_deployment.py --dataset Dataset005_Prostate --clients 2 --rounds 3
-
-# With modality-aware aggregation
-python run_federated_deployment.py --dataset Dataset005_Prostate --clients 2 --rounds 3 \
-    --enable-modality-aggregation \
-    --modality-weights '{"CT": 0.6, "MR": 0.4}'
-
-# Multi-dataset federation (different datasets per client)
-python run_federated_deployment.py \
-    --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset002_Heart"}' \
-    --clients 3 --rounds 5 --local-epochs 2 \
-    --enable-modality-aggregation \
-    --validate
-```
-
-### Option 2: Manual Step-by-Step Deployment
-
 #### Step 1: Set Environment Variables for Model Saving
 
 ```bash
