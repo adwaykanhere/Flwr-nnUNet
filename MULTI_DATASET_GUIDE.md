@@ -55,48 +55,66 @@ Multi-dataset federation enables federated learning scenarios where:
 
 ## Quick Start
 
-### Basic Multi-Dataset Setup
+### Manual Multi-Dataset Federation Deployment
+
+#### Step 1: Set Environment Variables
 
 ```bash
 # Activate conda environment
 conda activate flwrtest
 
-# Simple 3-client setup with different datasets
-python run_federated_deployment.py \
-    --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset002_Heart"}' \
-    --clients 3 --rounds 5 --local-epochs 2 \
-    --enable-modality-aggregation
+# Set multi-dataset configuration
+export CLIENT_DATASETS='{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset002_Heart"}'
+export ENABLE_MODALITY_AGGREGATION=true
+export MODALITY_WEIGHTS='{"CT": 0.4, "MR": 0.6}'
 ```
 
-### With Custom Modality Weights
+#### Step 2: Start SuperLink (Server)
 
 ```bash
-# Advanced setup with custom modality weights
-python run_federated_deployment.py \
-    --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset002_Heart"}' \
-    --clients 3 --rounds 10 --local-epochs 3 \
-    --enable-modality-aggregation \
-    --modality-weights '{"CT": 0.4, "MR": 0.6}' \
-    --validate --validation-frequency 2
+# Terminal 1: Start the SuperLink server
+flower-superlink --insecure
 ```
 
-### Dataset Compatibility Validation
+#### Step 3: Start SuperNodes (Clients) with Different Datasets
 
 ```bash
-# Validate dataset compatibility before training
-python run_federated_deployment.py \
-    --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset002_Heart"}' \
-    --validate-datasets
+# Terminal 2: Start first SuperNode with Prostate dataset
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9094 \
+    --node-config 'partition-id=0 dataset-name="Dataset005_Prostate" fold=0'
+
+# Terminal 3: Start second SuperNode with Spleen dataset  
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9095 \
+    --node-config 'partition-id=1 dataset-name="Dataset009_Spleen" fold=1'
+
+# Terminal 4: Start third SuperNode with Heart dataset
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9096 \
+    --node-config 'partition-id=2 dataset-name="Dataset002_Heart" fold=2'
+```
+
+#### Step 4: Run Federation
+
+```bash
+# Terminal 5: Start the federated learning
+flwr run . deployment
 ```
 
 ## Configuration Methods
 
-### Method 1: Command Line JSON
+### Method 1: Environment Variables with Node Config
 
 ```bash
-python run_federated_deployment.py \
-    --client-datasets '{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset002_Heart"}' \
-    --enable-modality-aggregation
+# Set multi-dataset configuration
+export CLIENT_DATASETS='{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset002_Heart"}'
+export ENABLE_MODALITY_AGGREGATION=true
+
+# Start SuperNodes with specific datasets
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9094 \
+    --node-config 'partition-id=0 dataset-name="Dataset005_Prostate"'
 ```
 
 ### Method 2: Environment Variables
@@ -111,7 +129,7 @@ export CLIENT_1_DATASET="Dataset009_Spleen"
 export CLIENT_2_DATASET="Dataset002_Heart"
 
 # Run federation
-python run_federated_deployment.py --clients 3 --enable-modality-aggregation
+flwr run . deployment
 ```
 
 ### Method 3: YAML Configuration File
@@ -183,8 +201,13 @@ training:
 Run with configuration file:
 
 ```bash
+# Load configuration into environment
 python federation_config.py  # Load and validate config
-python run_federated_deployment.py --config federation_config.yaml
+
+# Start manual deployment with config-based environment variables
+flower-superlink --insecure  # Terminal 1
+# Start SuperNodes as configured in YAML
+flwr run . deployment  # After all SuperNodes are running
 ```
 
 ## Multi-Dataset Examples
@@ -194,17 +217,38 @@ python run_federated_deployment.py --config federation_config.yaml
 **Scenario**: 4 hospitals with different imaging capabilities
 
 ```bash
-python run_federated_deployment.py --mode run \
-    --client-datasets '{
-        "0": "Dataset005_Prostate",
-        "1": "Dataset009_Spleen", 
-        "2": "Dataset027_ACDC",
-        "3": "Dataset137_BraTS21"
-    }' \
-    --clients 4 --rounds 15 --local-epochs 4 \
-    --enable-modality-aggregation \
-    --modality-weights '{"CT": 0.3, "MR": 0.5, "PET": 0.2}' \
-    --validate --validation-frequency 3
+# Set environment variables
+export CLIENT_DATASETS='{
+    "0": "Dataset005_Prostate",
+    "1": "Dataset009_Spleen", 
+    "2": "Dataset027_ACDC",
+    "3": "Dataset137_BraTS21"
+}'
+export ENABLE_MODALITY_AGGREGATION=true
+export MODALITY_WEIGHTS='{"CT": 0.3, "MR": 0.5, "PET": 0.2}'
+
+# Terminal 1: Start SuperLink
+flower-superlink --insecure
+
+# Terminal 2-5: Start SuperNodes
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9094 \
+    --node-config 'partition-id=0 dataset-name="Dataset005_Prostate" fold=0'
+
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9095 \
+    --node-config 'partition-id=1 dataset-name="Dataset009_Spleen" fold=1'
+
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9096 \
+    --node-config 'partition-id=2 dataset-name="Dataset027_ACDC" fold=2'
+
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9097 \
+    --node-config 'partition-id=3 dataset-name="Dataset137_BraTS21" fold=3'
+
+# Terminal 6: Run federation
+flwr run . deployment
 ```
 
 **Expected Output**:
@@ -225,17 +269,42 @@ python run_federated_deployment.py --mode run \
 **Scenario**: Different departments specializing in different body parts
 
 ```bash
-python run_federated_deployment.py --mode run \
-    --client-datasets '{
-        "0": "Dataset005_Prostate",
-        "1": "Dataset005_Prostate",
-        "2": "Dataset009_Spleen",
-        "3": "Dataset027_ACDC",
-        "4": "Dataset027_ACDC"
-    }' \
-    --clients 5 --rounds 12 --local-epochs 3 \
-    --enable-modality-aggregation \
-    --validate
+# Set environment variables for department specialization
+export CLIENT_DATASETS='{
+    "0": "Dataset005_Prostate",
+    "1": "Dataset005_Prostate",
+    "2": "Dataset009_Spleen",
+    "3": "Dataset027_ACDC",
+    "4": "Dataset027_ACDC"
+}'
+export ENABLE_MODALITY_AGGREGATION=true
+
+# Start SuperLink
+flower-superlink --insecure  # Terminal 1
+
+# Start SuperNodes for specialized departments
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9094 \
+    --node-config 'partition-id=0 dataset-name="Dataset005_Prostate" fold=0'  # Prostate Dept A
+
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9095 \
+    --node-config 'partition-id=1 dataset-name="Dataset005_Prostate" fold=1'  # Prostate Dept B
+
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9096 \
+    --node-config 'partition-id=2 dataset-name="Dataset009_Spleen" fold=2'    # Spleen Dept
+
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9097 \
+    --node-config 'partition-id=3 dataset-name="Dataset027_ACDC" fold=3'     # Cardiology A
+
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9098 \
+    --node-config 'partition-id=4 dataset-name="Dataset027_ACDC" fold=4'     # Cardiology B
+
+# Run federation
+flwr run . deployment  # Terminal 7
 ```
 
 ### Example 3: Cross-Institutional Validation
@@ -243,19 +312,39 @@ python run_federated_deployment.py --mode run \
 **Scenario**: Training on Institution A data, validating on Institution B data
 
 ```bash
-# Hospital Network Federation
-python run_federated_deployment.py --mode run \
-    --client-datasets '{
-        "0": "Dataset005_Prostate",
-        "1": "Dataset006_Prostate_External",
-        "2": "Dataset009_Spleen",
-        "3": "Dataset010_Spleen_External"
-    }' \
-    --clients 4 --rounds 20 --local-epochs 5 \
-    --enable-modality-aggregation \
-    --modality-weights '{"CT": 0.5, "MR": 0.5}' \
-    --validate --validation-frequency 1 \
-    --output-dir "cross_institutional_models"
+# Set cross-institutional environment
+export CLIENT_DATASETS='{
+    "0": "Dataset005_Prostate",
+    "1": "Dataset006_Prostate_External",
+    "2": "Dataset009_Spleen",
+    "3": "Dataset010_Spleen_External"
+}'
+export ENABLE_MODALITY_AGGREGATION=true
+export MODALITY_WEIGHTS='{"CT": 0.5, "MR": 0.5}'
+export OUTPUT_DIR="cross_institutional_models"
+
+# Start SuperLink
+flower-superlink --insecure  # Terminal 1
+
+# Cross-institutional SuperNodes
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9094 \
+    --node-config 'partition-id=0 dataset-name="Dataset005_Prostate" fold=0'        # Institution A - Prostate
+
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9095 \
+    --node-config 'partition-id=1 dataset-name="Dataset006_Prostate_External" fold=1' # Institution B - Prostate
+
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9096 \
+    --node-config 'partition-id=2 dataset-name="Dataset009_Spleen" fold=2'          # Institution A - Spleen
+
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9097 \
+    --node-config 'partition-id=3 dataset-name="Dataset010_Spleen_External" fold=3'  # Institution B - Spleen
+
+# Run cross-institutional federation
+flwr run . deployment  # Terminal 6
 ```
 
 ## Advanced Aggregation Strategies
@@ -425,9 +514,17 @@ export CUDA_VISIBLE_DEVICES=""
 # Add debugging to environment
 export PYTHONPATH="${PYTHONPATH}:."
 export CUDA_LAUNCH_BLOCKING=1
+export CLIENT_DATASETS='{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen"}'
 
-# Run with verbose output
-python run_federated_deployment.py --validate-datasets --client-datasets '...' --mode run
+# Run with manual deployment and verbose output
+flower-superlink --insecure --verbose  # Terminal 1
+
+# Start SuperNodes with debugging
+flower-supernode --insecure --superlink 127.0.0.1:9092 \
+    --clientappio-api-address 127.0.0.1:9094 \
+    --node-config 'partition-id=0 dataset-name="Dataset005_Prostate"' --verbose
+
+flwr run . deployment --verbose  # After SuperNodes are running
 ```
 
 #### Validate Configuration
@@ -463,17 +560,29 @@ print("Recommendations:", config["compatibility_analysis"]["recommendations"])
 
 #### Small Networks (2-3 clients)
 ```bash
---clients 3 --rounds 10 --local-epochs 5 --validation-frequency 2
+# Configure environment for small network
+export NUM_ROUNDS=10
+export LOCAL_EPOCHS=5
+export VALIDATION_FREQUENCY=2
+# Start 3 SuperNodes with different datasets
 ```
 
 #### Medium Networks (4-6 clients)  
 ```bash
---clients 5 --rounds 15 --local-epochs 3 --validation-frequency 3
+# Configure environment for medium network
+export NUM_ROUNDS=15
+export LOCAL_EPOCHS=3
+export VALIDATION_FREQUENCY=3
+# Start 5 SuperNodes with appropriate dataset distribution
 ```
 
 #### Large Networks (7+ clients)
 ```bash
---clients 10 --rounds 20 --local-epochs 2 --validation-frequency 5
+# Configure environment for large network
+export NUM_ROUNDS=20
+export LOCAL_EPOCHS=2
+export VALIDATION_FREQUENCY=5
+# Start 10+ SuperNodes with hierarchical dataset organization
 ```
 
 ### Multi-Dataset Specific Optimizations
