@@ -178,7 +178,7 @@ The implementation follows a 3-phase federated learning approach inspired from t
 
 ### Running the Federated Training
 
-You can run federated training in three ways:
+You can run federated training in two ways:
 
 #### Option 1: Flower Deployment (Recommended)
 
@@ -283,15 +283,6 @@ For convenience, use the bash script for automated deployment:
    
    # Training without validation for speed
    ./run_federated_deployment.sh --dataset Dataset005_Prostate --clients 2 --rounds 5 --no-validate
-   ```
-
-#### Option 3: Standalone Script (Legacy)
-
-The legacy simulation-based approach using Flower's local simulation:
-
-1. **Run the Simulation Script**
-   ```bash
-   python run_federated.py --dataset Dataset005_Prostate --clients 2 --rounds 3 --local-epochs 2 --validate
    ```
 
 ### Multi-Dataset Federation
