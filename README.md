@@ -2,13 +2,6 @@
 
 This project implements a federated learning version of nnU-Net completely using the Flower framework. It enables distributed training of medical image segmentation models in a modality agnostic setting across multiple clients while keeping data decentralized and private.
 
-# Overview
-
-The implementation follows a 3-phase federated learning approach inspired from the Kaapana framework:
-- **Phase -2**: Fingerprint collection from all clients
-- **Phase -1**: Global initialization and parameter distribution  
-- **Phase 0+**: Federated training rounds with model aggregation
-
 ## Architecture
 
 ### Components
@@ -21,39 +14,13 @@ The implementation follows a 3-phase federated learning approach inspired from t
 6. **`task.py`**: Custom `FedNnUNetTrainer` that extends nnU-Net's trainer for federated scenarios with validation and PyTorch model saving
 7. **`pyproject.toml`**: Flower app configuration and federation settings including deployment configurations
 
-### Key Features
-
-#### Native nnUNet Integration (`task.py`)
-- **Unified DataLoader**: Uses nnUNet's `nnUNetDataLoader` with automatic 2D/3D detection
-- **Automatic Dataset Detection**: Uses `infer_dataset_class()` to automatically detect B2ND or NPZ formats
-- **B2ND & NPZ Support**: Seamlessly handles both compressed B2ND and standard NPZ data formats
-- **Native Training Pipeline**: Leverages nnUNet's `train_step` method and epoch management
-- **Native Transforms**: Uses nnUNet's proven data augmentation and preprocessing transforms
-- **Deep Supervision**: Properly handles nnUNet's multi-scale segmentation outputs
-- **Ray Compatibility**: Maintains compatibility with Ray distributed execution using single-threaded augmentation
-
-#### Depployment-Ready Federated Strategy (`server_app.py` & `server_app_modality.py`)
-- **Fingerprint Aggregation**: Merges dataset fingerprints from multiple clients using weighted averaging
-- **Parameter Distribution**: Handles global model initialization and updates
-- **Round Management**: Coordinates the multi-phase training process
-- **Modality-Aware Aggregation**: Groups clients by detected modality (CT, MR, PET, US) for improved aggregation
-- **Intra-Modal Aggregation**: First aggregates within modality groups
-- **Inter-Modal Aggregation**: Weighted combination of modality-specific models into global model
-
-#### Client-Side Modality-Agnostic Implementation (`client_app.py`)
-- **Phase-Aware Training**: Different behaviors for fingerprint, initialization, and training phases
-- **Local Model Management**: Handles model weights serialization/deserialization
-- **Metadata Exchange**: Shares dataset characteristics while preserving privacy
-- **Modality Detection**: Automatic extraction of imaging modality from dataset.json channel names
-- **Enhanced Metadata**: Transmits modality information and dataset characteristics to server
-
 ## Setup Instructions
 
 ### Prerequisites
 
 1. **Python Environment**: Python 3.10+ with conda/pip
-2. **nnU-Net Installation**: nnU-Net v2 must be installed and configured
-3. **Preprocessed Data**: Any nnU-Net preprocessed dataset in standard .npz/.pkl format
+2. **nnU-Net Installation**: nnU-Netv2 must be installed and configured
+3. **Preprocessed Data**: Any nnU-Netv2 preprocessed dataset in standard .npz/.pkl format
 4. **Flower Framework**: Latest Flower with simulation support
 
 ### Installation Steps
@@ -460,7 +427,7 @@ nnUNet supports automatic mixed precision for faster GPU training:
 When extending this implementation:
 
 1. **Maintain Privacy**: Ensure no raw data is transmitted between clients
-2. **Error Handling**: Add robust error handling for different data formats
+2. **Error Handling**: Add robust handling for different data formats
 3. **Testing**: Test with multiple datasets and cross-validation folds
 4. **Documentation**: Update this README with any new features or requirements
 
