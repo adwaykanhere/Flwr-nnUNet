@@ -1,32 +1,13 @@
 # Federated nnU-Net with Flower Framework
 
-This project implements a federated learning version of nnU-Net using the Flower framework. It enables distributed training of medical image segmentation models across multiple clients while keeping data decentralized and private.
+This project implements a federated learning version of nnU-Net completely using the Flower framework. It enables distributed training of medical image segmentation models in a modality agnostic setting across multiple clients while keeping data decentralized and private.
 
 ## Overview
 
-The implementation follows a 3-phase federated learning approach:
+The implementation follows a 3-phase federated learning approach inspired from the Kaapana framework:
 - **Phase -2**: Fingerprint collection from all clients
 - **Phase -1**: Global initialization and parameter distribution  
 - **Phase 0+**: Federated training rounds with model aggregation
-
-## Key Features
-
--  **Native nnUNet Integration**: Uses nnUNet's proven dataloaders, transforms, and training methods
--  **B2ND & NPZ Data Support**: Handles nnU-Net v2 preprocessed data in .b2nd and .npz formats with automatic detection
--  **Multi-Phase Federation**: Implements fingerprint collection, initialization, and training phases
--  **GPU & CPU Support**: Optimized for both GPU acceleration and CPU-only environments
--  **Deep Supervision**: Fully supports nnUNet's 6-level deep supervision architecture
--  **Cross-Validation Support**: Maintains nnU-Net's 5-fold cross-validation splits
--  **Any nnUNet Dataset**: Works with any nnUNet-compatible medical imaging dataset
--  **Real Training Execution**: Performs actual training with loss computation and parameter updates
--  **Validation & Model Saving**: Automatic validation with Dice score calculation and best model tracking
--  **PyTorch Model Checkpoints**: Saves models in nnUNet-compatible .pth format for inference
--  **Configurable Paths**: User-friendly path configuration with environment variables and prompts
--  **Unified DataLoader**: Single dataloader handles both 2D and 3D cases automatically
--  **Enhanced CLI Interface**: Comprehensive command-line interface with run_federated.py script
--  **SuperNode/SuperLink Deployment**: Native Flower deployment engine support for distributed training
--  **Modality-Aware Aggregation**: Intelligent grouping and weighted aggregation based on imaging modality (CT, MR, PET, US)
--  **Multi-Modal Federation**: Supports heterogeneous medical imaging datasets with different modalities
 
 ## Architecture
 
@@ -70,7 +51,7 @@ The implementation follows a 3-phase federated learning approach:
 
 ### Prerequisites
 
-1. **Python Environment**: Python 3.8+ with conda/pip
+1. **Python Environment**: Python 3.10+ with conda/pip
 2. **nnU-Net Installation**: nnU-Net v2 must be installed and configured
 3. **Preprocessed Data**: Any nnU-Net preprocessed dataset in standard .npz/.pkl format
 4. **Flower Framework**: Latest Flower with simulation support
@@ -329,18 +310,6 @@ The deployment engine supports training across multiple datasets with automatic 
 
 📖 **For detailed multi-dataset instructions, see [MULTI_DATASET_GUIDE.md](MULTI_DATASET_GUIDE.md)**
 
-## Training Output
-
-The system will output:
-- Dataset loading and case discovery
-- Fingerprint collection from clients
-- Modality detection and grouping (if enabled)
-- Training round progress with real loss values
-- Validation Dice scores (if enabled)
-- Intra-modality and inter-modality aggregation results
-- Model aggregation results
-- PyTorch model saving (.pth files)
-
 ### Modality-Aware Aggregation
 
 The system automatically detects client modalities from dataset.json:
@@ -486,83 +455,6 @@ nnUNet supports automatic mixed precision for faster GPU training:
 
 5. **Simulation Speed**: Reduce `num-server-rounds` for faster testing
 
-## Recent Updates
-
-### What's New in v7.1 - Native Bash Deployment Script
--  **Native Bash Implementation**: Converted `run_federated_deployment.py` to `run_federated_deployment.sh` for native terminal process management
--  **Improved Process Control**: Direct bash process spawning and management instead of Python subprocess overhead
--  **Better Signal Handling**: Native bash signal trapping for graceful cleanup of SuperLink and SuperNode processes
--  **Terminal-Native Workflow**: Eliminates Python interpreter dependency for deployment commands
--  **Consistent CLI Interface**: Maintains all functionality while providing the expected terminal experience for distributed deployment
-
-### What's New in v7.0 - SuperNode/SuperLink Deployment & Modality-Aware Aggregation
--  **SuperNode/SuperLink Deployment**: Complete implementation of Flower's native deployment engines for production-ready federated learning
--  **Modality-Aware Aggregation**: Intelligent federated averaging that groups clients by imaging modality (CT, MR, PET, US) for improved model performance
--  **Automatic Modality Detection**: Extracts modality information from nnUNet dataset.json channel names and fingerprint data
--  **Intra-Modal Aggregation**: First aggregates within modality groups (CT clients → CT model, MR clients → MR model)
--  **Inter-Modal Aggregation**: Weighted combination of modality-specific models with configurable weights
--  **Enhanced Deployment Script**: Comprehensive command-line interface for SuperNode/SuperLink deployment with native bash implementation
--  **Production-Ready Federation**: Support for multi-machine deployment with configurable SuperLink host/port settings
--  **Modality-Aware Server**: Enhanced `server_app_modality.py` with `ModalityAwareFederatedStrategy` for multi-modal aggregation
--  **Enhanced Client Metadata**: Clients now transmit modality information and dataset characteristics for intelligent grouping
--  **Comprehensive Documentation**: Detailed deployment guide (`DEPLOYMENT_GUIDE.md`) with examples and troubleshooting
--  **Validation & Testing**: Complete test suite (`test_deployment.py`) to validate deployment setup and modality detection
-
-### What's New in v6.2 - Federated Logger Fix & Best Model Optimization
--  **Fixed Federated Logger Error**: Resolved "IndexError: list index out of range" in nnUNet logger during federated validation by properly initializing ema_fg_dice list
--  **Best Model Only Saving**: Optimized storage by saving only best performing models (both global and local) instead of all checkpoints
--  **Global Model Persistence**: Added server-side best global model saving in PyTorch `.pt` format to `global_models/global_best_model.pt`
--  **Improved Storage Efficiency**: Eliminated regular per-round checkpoint saving, keeping only best models with comprehensive metadata
--  **Enhanced Global Tracking**: Server now tracks best global validation scores across all federated rounds with proper aggregation
-
-### What's New in v6.1 - Validation Fixes & Enhanced Model Saving
--  **Fixed Validation Data Loading**: Resolved "too many values to unpack (expected 3)" error by properly handling nnUNet's 4-tuple dataset return
--  **PyTorch Model Saving**: Implemented nnUNet-compatible .pth model checkpoints alongside existing .npz format
--  **Best Model Tracking**: Automatic saving of best performing models based on validation Dice scores
--  **Enhanced Validation Pipeline**: Added proper validation_step method matching nnUNet's expected return format
--  **Standalone Federated Script**: New `run_federated.py` with comprehensive command-line interface
--  **Validation Error Fixes**: Fixed tensor dimension issues in prediction resizing for 3D full-resolution models
--  **Client Best Model Tracking**: Each client tracks and saves their best performing local models
-
-### What's New in v6.0 - B2ND Format Support & Path Configuration
--  **B2ND File Format Support**: Added native support for nnUNet's compressed B2ND format alongside NPZ
--  **Automatic Format Detection**: Uses `infer_dataset_class()` to automatically detect and load B2ND or NPZ datasets
--  **Unified DataLoader**: Replaced separate 2D/3D dataloaders with unified `nnUNetDataLoader` 
--  **Configurable Paths**: Removed hardcoded paths with environment variables and interactive prompts
--  **Improved User Experience**: Better error messages and guidance for path configuration
--  **Enhanced Documentation**: Comprehensive documentation for B2ND format and setup
-
-###  What's New in v5.0 - Native nnUNet Integration 
--  **Native nnUNet Pipeline**: Completely replaced custom data loading with nnUNet's native dataloaders and transforms
--  **Fixed Transform Pipeline**: Resolved `TypeError: argument after ** must be a mapping, not NoneType` by using nnUNet's native data format
--  **Real Training Execution**: Now performs actual nnUNet training with real loss computation and parameter updates
--  **Deep Supervision Support**: Properly handles nnUNet's 6-level deep supervision architecture
--  **GPU Support**: Added comprehensive GPU support with proper CUDA configuration
--  **Performance Optimization**: Leverages nnUNet's proven training methods for optimal performance
-
-### What's New in v4.0 - Real Data Integration 
--  **Fixed Pickle Loading Errors**: Resolved multiprocessing issues with dataset classes
--  **Real Data Support**: Now loads actual nnUNet preprocessed .npz/.pkl files instead of dummy data
--  **Generic Dataset Support**: Updated codebase to work with any nnUNet dataset, not just prostate
--  **Improved Error Handling**: Better error messages and graceful handling of missing files
--  **Updated API Compatibility**: Fixed Flower client API compatibility issues
-
-### What's New in v3.0
-The system now supports modern nnUNet data formats and improved usability:
-- **B2ND Support**: Automatically detects and loads compressed B2ND files for better performance
-- **Format Flexibility**: Seamlessly works with both B2ND and NPZ datasets without configuration
-- **Unified DataLoader**: Single dataloader handles both 2D and 3D cases automatically  
-- **User-Friendly Paths**: No more hardcoded paths - uses environment variables with interactive fallbacks
-- **Better Error Messages**: Clear guidance when paths are not configured correctly
-
-### What's New in v2.0
-The system now uses nnUNet's native training pipeline:
-- **Before**: Custom data loading and training logic that sometimes failed
-- **After**: Native nnUNet dataloaders, transforms, and training methods
-- **Training Verification**: Real loss values printed (`Batch 1 loss: 1.1357`) confirming actual training
-- **Data Shapes**: Proper medical imaging shapes `torch.Size([2, 2, 20, 320, 256])` with deep supervision
-- **GPU Ready**: Full GPU support for faster training with proper CUDA handling
-
 ## Technical Details
 
 ### Native nnUNet Integration
@@ -572,7 +464,7 @@ The system now uses nnUNet's native training pipeline:
 - **Architecture**: Supports nnUNet's U-Net with deep supervision (6 output scales)
 
 ### File Format Compatibility
-- **Input Data**: 
+- **Input Data**: Follows nnUNet data formats
   - `.b2nd` files (compressed format, preferred for performance)
   - `.npz` files (standard numpy format, legacy support)
   - Automatic format detection and loading
@@ -610,8 +502,8 @@ When extending this implementation:
 
 This implementation is based on:
 - [nnU-Net v2](https://github.com/MIC-DKFZ/nnUNet) for medical image segmentation
-- [Flower Framework](https://flower.dev/) for federated learning
-- [Kaapana](https://kaapana.readthedocs.io/en/latest/intro_kaapana.html) based Federated learning concepts from medical AI research
+- [Flower Framework](https://flower.dev/) for setting up the complete federated learning infrastructure
+- [Kaapana](https://kaapana.readthedocs.io/en/latest/intro_kaapana.html) based Federated learning concepts were used while federating nnUNet 
 
 ## License
 
