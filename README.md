@@ -14,32 +14,6 @@ This project implements a federated learning version of nnU-Net completely using
 6. **`task.py`**: Custom `FedNnUNetTrainer` that extends nnU-Net's trainer for federated scenarios with validation and PyTorch model saving
 7. **`pyproject.toml`**: Flower app configuration and federation settings including deployment configurations
 
-### Key Features
-
-#### Native nnUNet Integration (`task.py`)
-- **Unified DataLoader**: Uses nnUNet's `nnUNetDataLoader` with automatic 2D/3D detection
-- **Automatic Dataset Detection**: Uses `infer_dataset_class()` to automatically detect B2ND or NPZ formats
-- **B2ND & NPZ Support**: Seamlessly handles both compressed B2ND and standard NPZ data formats
-- **Native Training Pipeline**: Leverages nnUNet's `train_step` method and epoch management
-- **Native Transforms**: Uses nnUNet's proven data augmentation and preprocessing transforms
-- **Deep Supervision**: Properly handles nnUNet's multi-scale segmentation outputs
-- **Ray Compatibility**: Maintains compatibility with Ray distributed execution using single-threaded augmentation
-
-#### Depployment-Ready Federated Strategy (`server_app.py` & `server_app_modality.py`)
-- **Fingerprint Aggregation**: Merges dataset fingerprints from multiple clients using weighted averaging
-- **Parameter Distribution**: Handles global model initialization and updates
-- **Round Management**: Coordinates the multi-phase training process
-- **Modality-Aware Aggregation**: Groups clients by detected modality (CT, MR, PET, US) for improved aggregation
-- **Intra-Modal Aggregation**: First aggregates within modality groups
-- **Inter-Modal Aggregation**: Weighted combination of modality-specific models into global model
-
-#### Client-Side Modality-Agnostic Implementation (`client_app.py`)
-- **Phase-Aware Training**: Different behaviors for fingerprint, initialization, and training phases
-- **Local Model Management**: Handles model weights serialization/deserialization
-- **Metadata Exchange**: Shares dataset characteristics while preserving privacy
-- **Modality Detection**: Automatic extraction of imaging modality from dataset.json channel names
-- **Enhanced Metadata**: Transmits modality information and dataset characteristics to server
-
 ## Setup Instructions
 
 ### Prerequisites
