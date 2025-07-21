@@ -19,8 +19,8 @@ This project implements a federated learning version of nnU-Net completely using
 ### Prerequisites
 
 1. **Python Environment**: Python 3.10+ with conda/pip
-2. **nnU-Net Installation**: nnU-Net v2 must be installed and configured
-3. **Preprocessed Data**: Any nnU-Net preprocessed dataset in standard .npz/.pkl format
+2. **nnU-Net Installation**: nnU-Netv2 must be installed and configured
+3. **Preprocessed Data**: Any nnU-Netv2 preprocessed dataset in standard .npz/.pkl format
 4. **Flower Framework**: Latest Flower with simulation support
 
 ### Installation Steps
