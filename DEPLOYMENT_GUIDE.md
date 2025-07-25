@@ -18,7 +18,7 @@ The deployment system consists of:
 
 ```bash
 # Set model saving configuration (REQUIRED for saving models)
-export OUTPUT_ROOT="/path/to/federated_models"  # Where to save trained models
+export OUTPUT_ROOT="./federated_models"         # User-writable directory (recommended)
 export VALIDATE_MODELS=true                     # Enable validation for model saving
 ```
 
@@ -102,7 +102,11 @@ flwr run . deployment
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
+<<<<<<< Updated upstream
 | `OUTPUT_ROOT` | `/local/pathto/nnunet_output` | Directory where models are saved |
+=======
+| `OUTPUT_ROOT` | `./federated_models` | Directory where models are saved |
+>>>>>>> Stashed changes
 | `VALIDATE_MODELS` | `false` | Enable validation (required for model saving) |
 
 ### Modality-Aware Aggregation
@@ -350,11 +354,27 @@ flwr run . deployment
    - Use gradient checkpointing if available
 
 5. **Models Not Being Saved**
-   - **Missing OUTPUT_ROOT**: Ensure `export OUTPUT_ROOT="/path/to/federated_models"`
+   - **Missing OUTPUT_ROOT**: Ensure `export OUTPUT_ROOT="./federated_models"`
    - **Validation Disabled**: Models only save during validation rounds with improvement
    - **Permissions**: Check write permissions: `mkdir -p $OUTPUT_ROOT && touch $OUTPUT_ROOT/test.txt`
    - **No Validation Improvement**: Models only save when validation Dice score improves
    - **Check Logs**: Look for "Saved best model checkpoint" in client logs
+
+6. **Permission Denied Errors**
+   ```
+   PermissionError: [Errno 13] Permission denied: '/local'
+   ```
+   **Solutions**:
+   ```bash
+   # Use current directory (recommended)
+   export OUTPUT_ROOT="./federated_models"
+   
+   # Or use home directory
+   export OUTPUT_ROOT="$HOME/federated_models"
+   
+   # For testing, use temporary directory
+   export OUTPUT_ROOT="/tmp/federated_models"
+   ```
 
 ### Validation
 

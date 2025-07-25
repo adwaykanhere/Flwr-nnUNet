@@ -3,7 +3,7 @@
 import os
 import json
 import numpy as np
-from typing import Dict, List, Tuple, Optional, Union
+from typing import Dict, List, Tuple, Optional, Union, Any
 import flwr as fl
 from flwr.common import Context, FitRes, NDArrays, Parameters, parameters_to_ndarrays, ndarrays_to_parameters
 from flwr.server import ServerApp, ServerAppComponents, ServerConfig
@@ -11,6 +11,7 @@ from flwr.server.strategy import FedAvg
 from flwr.server.client_proxy import ClientProxy
 
 from task import merge_dataset_fingerprints
+from fedma_strategy import FedMAStrategy
 
 
 class ModalityAwareFederatedStrategy(FedAvg):
@@ -26,6 +27,8 @@ class ModalityAwareFederatedStrategy(FedAvg):
                  expected_num_clients: int = 2, 
                  enable_modality_aggregation: bool = False,
                  modality_weights: Optional[Dict[str, float]] = None,
+                 enable_fedma: bool = True,
+                 fedma_config: Optional[Dict[str, Any]] = None,
                  **kwargs):
         super().__init__(**kwargs)
         self.expected_num_clients = expected_num_clients
@@ -50,12 +53,33 @@ class ModalityAwareFederatedStrategy(FedAvg):
         # Per-modality model tracking
         self.best_modality_models: Dict[str, Dict] = {}  # modality -> {dice, round, params}
         
+        # Architecture compatibility tracking
+        self.detected_architectures: Dict[str, Dict] = {}  # client_id -> {input_channels, num_classes, patch_size}
+        
+        # FedMA integration
+        self.enable_fedma = enable_fedma
+        self.fedma_config = fedma_config or {}
+        if self.enable_fedma:
+            self.fedma_strategy = FedMAStrategy(
+                enable_layer_matching=self.fedma_config.get('enable_layer_matching', True),
+                enable_channel_harmonization=self.fedma_config.get('enable_channel_harmonization', True), 
+                enable_class_harmonization=self.fedma_config.get('enable_class_harmonization', True),
+                matching_method=self.fedma_config.get('matching_method', 'cosine'),
+                channel_method=self.fedma_config.get('channel_method', 'padding'),
+                class_method=self.fedma_config.get('class_method', 'union')
+            )
+        else:
+            self.fedma_strategy = None
+        
         # Create global models directory
         os.makedirs(self.global_models_dir, exist_ok=True)
         print(f"[Server] Global models will be saved to: {self.global_models_dir}")
         print(f"[Server] Modality-aware aggregation: {'enabled' if self.enable_modality_aggregation else 'disabled'}")
+        print(f"[Server] FedMA architecture harmonization: {'enabled' if self.enable_fedma else 'disabled'}")
         if self.modality_weights:
             print(f"[Server] Modality weights: {self.modality_weights}")
+        if self.enable_fedma:
+            print(f"[Server] FedMA config: {self.fedma_config}")
 
     def extract_modality_from_metadata(self, metrics: Dict) -> Optional[str]:
         """Extract modality information from client metrics"""
@@ -126,6 +150,9 @@ class ModalityAwareFederatedStrategy(FedAvg):
         
         self.client_signatures[client_id] = signature
         
+        # Extract and store architecture information
+        self._update_client_architecture(client_id, metrics)
+        
         # Update modality groups (traditional)
         if modality not in self.modality_groups:
             self.modality_groups[modality] = []
@@ -142,6 +169,79 @@ class ModalityAwareFederatedStrategy(FedAvg):
         print(f"  Dataset: {dataset}")
         print(f"  Modality: {modality}")
         print(f"  Signature: {signature}")
+        
+        if client_id in self.detected_architectures:
+            arch = self.detected_architectures[client_id]
+            print(f"  Architecture: {arch.get('input_channels', '?')} channels, {arch.get('num_classes', '?')} classes")
+
+    def _update_client_architecture(self, client_id: str, metrics: Dict):
+        """Extract and store client architecture information"""
+        arch_info = {}
+        
+        # Extract input channels
+        if 'input_channels' in metrics:
+            arch_info['input_channels'] = int(metrics['input_channels'])
+        
+        # Extract number of classes
+        if 'num_classes' in metrics:
+            arch_info['num_classes'] = int(metrics['num_classes'])
+        
+        # Extract patch size
+        if 'patch_size' in metrics:
+            patch_size = metrics['patch_size']
+            if isinstance(patch_size, (list, tuple)):
+                arch_info['patch_size'] = list(patch_size)
+            elif isinstance(patch_size, str):
+                try:
+                    import json
+                    arch_info['patch_size'] = json.loads(patch_size)
+                except:
+                    pass
+        
+        if arch_info:
+            self.detected_architectures[client_id] = arch_info
+            print(f"[Server] Updated architecture for client {client_id}: {arch_info}")
+            
+            # Register with FedMA strategy
+            if self.fedma_strategy:
+                self.fedma_strategy.register_client_architecture(client_id, arch_info)
+            
+            # Log architecture compatibility analysis
+            self._analyze_architecture_compatibility()
+
+    def _analyze_architecture_compatibility(self):
+        """Analyze architecture compatibility across all clients"""
+        if len(self.detected_architectures) < 2:
+            return
+        
+        input_channels = []
+        num_classes = []
+        patch_sizes = []
+        
+        for client_id, arch_info in self.detected_architectures.items():
+            if 'input_channels' in arch_info:
+                input_channels.append(arch_info['input_channels'])
+            if 'num_classes' in arch_info:
+                num_classes.append(arch_info['num_classes'])
+            if 'patch_size' in arch_info:
+                patch_sizes.append(tuple(arch_info['patch_size']))
+        
+        # Check for architecture heterogeneity
+        incompatible_channels = len(set(input_channels)) > 1 if input_channels else False
+        incompatible_classes = len(set(num_classes)) > 1 if num_classes else False
+        incompatible_patches = len(set(patch_sizes)) > 1 if patch_sizes else False
+        
+        if incompatible_channels or incompatible_classes or incompatible_patches:
+            print(f"[Server] ⚠️  Architecture incompatibilities detected:")
+            if incompatible_channels:
+                print(f"  Input channels: {set(input_channels)}")
+            if incompatible_classes:  
+                print(f"  Number of classes: {set(num_classes)}")
+            if incompatible_patches:
+                print(f"  Patch sizes: {set(patch_sizes)}")
+            print(f"[Server] 🔄 Using FedBN-style parameter exclusion to handle incompatibilities")
+        else:
+            print(f"[Server] ✅ All clients have compatible architectures")
 
     def aggregate_within_modality(self, 
                                   modality: str, 
@@ -392,10 +492,155 @@ class ModalityAwareFederatedStrategy(FedAvg):
         return global_params, global_summary
 
     def _weighted_average(self, params_and_weights: List[Tuple[NDArrays, float]]) -> NDArrays:
-        """Perform weighted average of parameters"""
+        """Perform weighted average of parameters with optional FedMA harmonization"""
         if not params_and_weights:
             return []
         
+        # Check if FedMA should be used based on architecture compatibility
+        use_fedma = self._should_use_fedma(params_and_weights)
+        
+        if use_fedma and self.fedma_strategy:
+            return self._fedma_weighted_average(params_and_weights)
+        else:
+            return self._traditional_weighted_average(params_and_weights)
+    
+    def _should_use_fedma(self, params_and_weights: List[Tuple[NDArrays, float]]) -> bool:
+        """Determine if FedMA should be used based on detected incompatibilities"""
+        print(f"[Server] FedMA Check: enable_fedma={self.enable_fedma}, fedma_strategy={self.fedma_strategy is not None}")
+        if not self.enable_fedma or not self.fedma_strategy:
+            print(f"[Server] FedMA disabled: enable_fedma={self.enable_fedma}, fedma_strategy={self.fedma_strategy is not None}")
+            return False
+        
+        if len(params_and_weights) < 2:
+            print(f"[Server] Not enough clients for FedMA: {len(params_and_weights)}")
+            return False
+        
+        # Check for parameter shape incompatibilities (most important check)
+        shape_incompatibilities = self._detect_parameter_shape_mismatches(params_and_weights)
+        if shape_incompatibilities > 0:
+            print(f"[Server] Parameter shape incompatibilities detected ({shape_incompatibilities}) - using FedMA harmonization")
+            return True
+        
+        # Check for architecture metadata incompatibilities (secondary check)
+        if len(self.detected_architectures) >= 2:
+            input_channels = []
+            num_classes = []
+            
+            for arch_info in self.detected_architectures.values():
+                if 'input_channels' in arch_info:
+                    input_channels.append(arch_info['input_channels'])
+                if 'num_classes' in arch_info:
+                    num_classes.append(arch_info['num_classes'])
+            
+            # Use FedMA if there are metadata incompatibilities
+            incompatible_channels = len(set(input_channels)) > 1 if input_channels else False
+            incompatible_classes = len(set(num_classes)) > 1 if num_classes else False
+            
+            if incompatible_channels or incompatible_classes:
+                print(f"[Server] Architecture metadata incompatibilities detected - using FedMA harmonization")
+                print(f"  Input channels: {set(input_channels)}")
+                print(f"  Output classes: {set(num_classes)}")
+                return True
+        
+        print(f"[Server] No incompatibilities detected - using traditional FedAvg")
+        return False
+    
+    def _detect_parameter_shape_mismatches(self, params_and_weights: List[Tuple[NDArrays, float]]) -> int:
+        """Detect parameter shape mismatches between clients"""
+        if len(params_and_weights) < 2:
+            return 0
+        
+        mismatches = 0
+        
+        # Get parameter lists from each client
+        client_params = [params for params, _ in params_and_weights]
+        
+        # Check if all clients have the same number of parameters
+        param_counts = [len(params) for params in client_params]
+        if len(set(param_counts)) > 1:
+            print(f"[Server] Parameter count mismatch: {param_counts}")
+            mismatches += 1
+        
+        # Check parameter shapes at each position
+        if all(len(params) > 0 for params in client_params):
+            min_params = min(len(params) for params in client_params)
+            
+            for i in range(min_params):
+                # Get shapes at position i from all clients
+                shapes_at_position = []
+                for client_idx, params in enumerate(client_params):
+                    if i < len(params) and hasattr(params[i], 'shape'):
+                        shapes_at_position.append(params[i].shape)
+                    else:
+                        shapes_at_position.append(None)
+                
+                # Check if all shapes at this position are the same
+                valid_shapes = [s for s in shapes_at_position if s is not None]
+                if len(set(valid_shapes)) > 1:
+                    print(f"[Server] Shape mismatch at parameter {i}: {valid_shapes}")
+                    mismatches += 1
+                    
+                    # Log specific shape differences for debugging
+                    if len(valid_shapes) == 2:  # Most common case
+                        shape1, shape2 = valid_shapes[0], valid_shapes[1]
+                        if len(shape1) == len(shape2) and len(shape1) == 5:  # 3D conv layers
+                            if shape1[2] != shape2[2]:  # Channel dimension difference
+                                print(f"[Server] Channel dimension difference detected: {shape1[2]} vs {shape2[2]}")
+        
+        print(f"[Server] Total parameter shape mismatches detected: {mismatches}")
+        return mismatches
+    
+    def _fedma_weighted_average(self, params_and_weights: List[Tuple[NDArrays, float]]) -> NDArrays:
+        """Perform FedMA-enhanced weighted averaging with architecture harmonization"""
+        print(f"[Server] Performing FedMA aggregation for {len(params_and_weights)} clients")
+        
+        try:
+            # Extract parameters and weights
+            client_parameters = [params for params, _ in params_and_weights]
+            client_weights = [weight for _, weight in params_and_weights]
+            
+            # Log parameter structure from each client
+            for i, params in enumerate(client_parameters):
+                print(f"[Server] Client {i}: {len(params)} parameters")
+                if params:
+                    first_shape = params[0].shape if hasattr(params[0], 'shape') else 'unknown'
+                    last_shape = params[-1].shape if hasattr(params[-1], 'shape') else 'unknown'
+                    print(f"[Server] Client {i}: first param shape = {first_shape}, last param shape = {last_shape}")
+            
+            # Get client architectures in same order
+            client_architectures = []
+            for i, (params, weight) in enumerate(params_and_weights):
+                # Try to match to detected architectures (this is approximate)
+                if len(self.detected_architectures) > i:
+                    arch = list(self.detected_architectures.values())[i]
+                else:
+                    # Default architecture
+                    arch = {'input_channels': 1, 'num_classes': 2}
+                client_architectures.append(arch)
+            
+            # Apply FedMA aggregation
+            harmonized_params = self.fedma_strategy.fedma_aggregate(
+                client_parameters, client_weights, client_architectures
+            )
+            
+            print(f"[Server] FedMA aggregation completed")
+            return harmonized_params
+            
+        except Exception as e:
+            print(f"[Server] FedMA aggregation failed: {e}")
+            print(f"[Server] Falling back to traditional weighted average")
+            
+            # Fallback to traditional aggregation
+            try:
+                return self._traditional_weighted_average(params_and_weights)
+            except Exception as fallback_e:
+                print(f"[Server] Traditional aggregation fallback failed: {fallback_e}")
+                print(f"[Server] Using first client's parameters as emergency fallback")
+                # Emergency fallback: return first client's parameters
+                return params_and_weights[0][0] if params_and_weights else []
+    
+    def _traditional_weighted_average(self, params_and_weights: List[Tuple[NDArrays, float]]) -> NDArrays:
+        """Perform traditional weighted average of parameters"""
         # Calculate total weight
         total_weight = sum(weight for _, weight in params_and_weights)
         if total_weight == 0:
@@ -438,7 +683,36 @@ class ModalityAwareFederatedStrategy(FedAvg):
             "local_epochs": int(os.environ.get('LOCAL_EPOCHS', 2)),
             "validate": federated_round >= 0,  # Enable validation for training rounds
             "enable_modality_metadata": True,  # Request modality information from clients
+            "exclude_incompatible_layers": True,  # Enable architecture-aware parameter filtering
+            "fedma_enabled": self.enable_fedma,  # Enable FedMA harmonization
         }
+        
+        # Add architecture constraints if detected from previous rounds
+        if hasattr(self, 'detected_architectures') and self.detected_architectures:
+            # Use most common architecture as reference
+            input_channels = []
+            num_classes = []
+            
+            for client_id, arch_info in self.detected_architectures.items():
+                if 'input_channels' in arch_info:
+                    input_channels.append(arch_info['input_channels'])
+                if 'num_classes' in arch_info:
+                    num_classes.append(arch_info['num_classes'])
+            
+            if input_channels:
+                # Use most common input channel count
+                from collections import Counter
+                common_channels = Counter(input_channels).most_common(1)[0][0]
+                config["expected_input_channels"] = common_channels
+                print(f"[Server] Setting expected input channels: {common_channels}")
+            
+            if num_classes:
+                # Use most common class count  
+                from collections import Counter
+                common_classes = Counter(num_classes).most_common(1)[0][0]
+                config["expected_num_classes"] = common_classes
+                print(f"[Server] Setting expected num classes: {common_classes}")
+        
             
         # Call parent's configure_fit method
         fit_ins = super().configure_fit(server_round, parameters, client_manager)
@@ -528,6 +802,7 @@ class ModalityAwareFederatedStrategy(FedAvg):
             print(f"  Dataset-modality groups: {num_dataset_modality_groups}")
             
             # Choose aggregation strategy
+            print(f"[Server] Strategy decision: enable_modality_aggregation={self.enable_modality_aggregation}")
             if self.enable_modality_aggregation and num_unique_datasets > 1:
                 # Multi-dataset aware aggregation (most sophisticated)
                 print("[Server] Performing multi-dataset modality-aware aggregation...")
@@ -559,7 +834,7 @@ class ModalityAwareFederatedStrategy(FedAvg):
                     aggregated_result = None
             else:
                 # Traditional FedAvg aggregation
-                print("[Server] Performing traditional FedAvg aggregation...")
+                print(f"[Server] Performing traditional FedAvg aggregation (enable_modality_aggregation={self.enable_modality_aggregation})...")
                 aggregated_result = super().aggregate_fit(server_round, results, failures)
                 global_summary = {'aggregation_method': 'traditional_fedavg'}
             
@@ -621,7 +896,18 @@ class ModalityAwareFederatedStrategy(FedAvg):
 def server_fn(context: Context):
     expected_clients = int(os.environ.get("NUM_CLIENTS", 2))
     training_rounds = int(os.environ.get("NUM_TRAINING_ROUNDS", 3))
-    enable_modality_aggregation = os.environ.get("ENABLE_MODALITY_AGGREGATION", "false").lower() == "true"
+    enable_modality_aggregation = os.environ.get("ENABLE_MODALITY_AGGREGATION", "true").lower() == "true"
+    
+    # FedMA configuration - enabled for debugging
+    enable_fedma = os.environ.get("ENABLE_FEDMA", "true").lower() == "true"
+    fedma_config = {
+        'enable_layer_matching': os.environ.get("FEDMA_LAYER_MATCHING", "true").lower() == "true",
+        'enable_channel_harmonization': os.environ.get("FEDMA_CHANNEL_HARMONIZATION", "true").lower() == "true",
+        'enable_class_harmonization': os.environ.get("FEDMA_CLASS_HARMONIZATION", "true").lower() == "true",
+        'matching_method': os.environ.get("FEDMA_MATCHING_METHOD", "cosine"),
+        'channel_method': os.environ.get("FEDMA_CHANNEL_METHOD", "padding"),
+        'class_method': os.environ.get("FEDMA_CLASS_METHOD", "union")
+    }
     
     # Parse modality weights if provided
     modality_weights = None
@@ -641,6 +927,8 @@ def server_fn(context: Context):
         expected_num_clients=expected_clients,
         enable_modality_aggregation=enable_modality_aggregation,
         modality_weights=modality_weights,
+        enable_fedma=enable_fedma,
+        fedma_config=fedma_config,
     )
     config = ServerConfig(num_rounds=total_rounds)
     
@@ -649,8 +937,11 @@ def server_fn(context: Context):
     print(f"[Server] - Training rounds: {training_rounds}")
     print(f"[Server] - Total rounds: {total_rounds} (2 setup + {training_rounds} training)")
     print(f"[Server] - Modality-aware aggregation: {enable_modality_aggregation}")
+    print(f"[Server] - FedMA architecture harmonization: {enable_fedma}")
     if modality_weights:
         print(f"[Server] - Modality weights: {modality_weights}")
+    if enable_fedma:
+        print(f"[Server] - FedMA config: {fedma_config}")
     
     return ServerAppComponents(strategy=strategy, config=config)
 

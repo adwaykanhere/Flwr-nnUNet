@@ -38,7 +38,7 @@ fraction-evaluate = 0.0
 
 [tool.flwr.federations]
 default = "local-simulation"
-deployment = "supernode-deployment"
+
 
 [tool.flwr.federations.local-simulation]
 options.num-supernodes = 1

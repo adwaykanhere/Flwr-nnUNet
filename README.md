@@ -149,8 +149,12 @@ You can run federated training in two ways:
 
 The native terminal approach using Flower's deployment commands directly:
 
-1. **Activate Conda Environment**
+1. **Set Environment Variables and Activate Conda Environment**
    ```bash
+   # Set model saving directory (recommended)
+   export OUTPUT_ROOT="./federated_models"  # Current directory (user-writable)
+   
+   # Activate conda environment
    conda activate flwrtest  # or your preferred environment
    ```
 
@@ -380,9 +384,30 @@ nnUNet supports automatic mixed precision for faster GPU training:
    - **Validation Disabled**: Models are only saved during validation - ensure validation is enabled
    - **Directory Permissions**: Check write permissions for the output directory
    - **Verification**: After training, check for `.pt` files in `OUTPUT_ROOT/client_X/` directories
-   - **Default Path**: If not set, defaults to `/local/projects-t3/isaiahlab/nnunet_output`
+   - **Default Path**: If not set, defaults to `./federated_models` (current directory)
+   - **Permission Error**: See troubleshooting section below for `/local` directory errors
 
-7. **B2ND Format Issues**
+7. **Permission Denied Errors (OUTPUT_ROOT)**
+   ```
+   PermissionError: [Errno 13] Permission denied: '/local'
+   ```
+   **Solutions**:
+   ```bash
+   # Option 1: Use user-writable directory (recommended)
+   export OUTPUT_ROOT="./federated_models"
+   
+   # Option 2: Use home directory
+   export OUTPUT_ROOT="$HOME/federated_models"
+   
+   # Option 3: Use /tmp for testing
+   export OUTPUT_ROOT="/tmp/federated_models"
+   
+   # Option 4: Create directory with proper permissions (if you need /local)
+   sudo mkdir -p /local/projects-t3/isaiahlab/nnunet_output
+   sudo chown $USER /local/projects-t3/isaiahlab/nnunet_output
+   ```
+
+8. **B2ND Format Issues**
    - **Missing blosc2**: Install with `pip install blosc2`
    - **Corruption**: B2ND files may be corrupted, rerun preprocessing
    - **Version Mismatch**: Ensure nnUNet v2 latest version for B2ND support

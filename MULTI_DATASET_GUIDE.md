@@ -47,6 +47,7 @@ Multi-dataset federation enables federated learning scenarios where:
 - **Traditional FedAvg**: Single dataset, single modality
 - **Modality-Aware**: Single dataset, multiple modalities
 - **Multi-Dataset**: Multiple datasets with cross-dataset modality aggregation
+- **FedMA Architecture Harmonization**: Handles different input channels and output classes
 
 ### ✅ **Dataset Compatibility Analysis**
 - Automatic compatibility checking between datasets
@@ -64,13 +65,19 @@ Multi-dataset federation enables federated learning scenarios where:
 conda activate flwrtest
 
 # Set model saving configuration (REQUIRED)
-export OUTPUT_ROOT="/path/to/multi_dataset_models"  # Where to save models
+export OUTPUT_ROOT="./multi_dataset_models"        # User-writable directory
 export VALIDATE_MODELS=true                        # Enable validation for model saving
 
 # Set multi-dataset configuration
 export CLIENT_DATASETS='{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "2": "Dataset002_Heart"}'
 export ENABLE_MODALITY_AGGREGATION=true
 export MODALITY_WEIGHTS='{"CT": 0.4, "MR": 0.6}'
+
+# Enable FedMA architecture harmonization (default: enabled)
+export ENABLE_FEDMA=true
+export FEDMA_CHANNEL_HARMONIZATION=true  # Handle different input channels
+export FEDMA_CLASS_HARMONIZATION=true    # Handle different output classes
+export FEDMA_LAYER_MATCHING=true         # Enable neuron matching
 ```
 
 #### Step 2: Start SuperLink (Server)
@@ -537,7 +544,7 @@ export CUDA_VISIBLE_DEVICES=""
 echo $OUTPUT_ROOT
 
 # Set OUTPUT_ROOT if missing
-export OUTPUT_ROOT="/path/to/multi_dataset_models"
+export OUTPUT_ROOT="./multi_dataset_models"
 
 # Ensure validation is enabled (required for model saving)
 export VALIDATE_MODELS=true

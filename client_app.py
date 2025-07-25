@@ -2,6 +2,7 @@
 
 import os
 import json
+import numpy as np
 from typing import Dict
 import flwr as fl
 from flwr.client import ClientApp, NumPyClient
@@ -171,6 +172,489 @@ class NnUNet3DFullresClient(NumPyClient):
         
         return modality_info
 
+    def _get_architecture_info(self) -> dict:
+        """Extract architecture information for compatibility checking."""
+        arch_info = {}
+        
+        try:
+            # Load dataset.json to get input channels and output classes
+            with open(self.dataset_json_path, "r") as f:
+                dataset_dict = json.load(f)
+            
+            # Get number of input channels
+            channel_names = dataset_dict.get("channel_names", {})
+            arch_info["input_channels"] = len(channel_names) if channel_names else 1
+            
+            # Get number of output classes (labels)
+            labels = dataset_dict.get("labels", {})
+            # Background is typically label 0, so num_classes = max_label + 1
+            if labels:
+                label_values = []
+                for label_name, label_value in labels.items():
+                    if isinstance(label_value, (int, float)):
+                        label_values.append(int(label_value))
+                    elif isinstance(label_value, list) and len(label_value) > 0:
+                        label_values.extend([int(x) for x in label_value if isinstance(x, (int, float))])
+                
+                arch_info["num_classes"] = max(label_values) + 1 if label_values else 2
+            else:
+                arch_info["num_classes"] = 2  # Default binary segmentation
+            
+            # Get patch size from trainer if available
+            if hasattr(self.trainer, 'was_initialized') and self.trainer.was_initialized:
+                if hasattr(self.trainer, 'configuration_manager'):
+                    patch_size = getattr(self.trainer.configuration_manager, 'patch_size', None)
+                    if patch_size:
+                        arch_info["patch_size"] = list(patch_size)
+            
+            print(f"[Client {self.client_id}] Architecture info: {arch_info}")
+            
+        except Exception as exc:
+            print(f"[Client {self.client_id}] Error extracting architecture info: {exc}")
+            arch_info = {
+                "input_channels": 1,
+                "num_classes": 2,
+                "patch_size": [20, 160, 160]  # Default 3D patch size
+            }
+        
+        return arch_info
+
+    def _filter_incompatible_parameters(self, weights_dict: dict, arch_info: dict, config: dict) -> dict:
+        """
+        Filter out parameters that may cause architecture mismatches.
+        Based on FedBN approach - exclude layers likely to have different architectures.
+        
+        Common incompatible layer patterns in nnUNet:
+        - Input layers: sensitive to number of input channels
+        - Output layers: sensitive to number of output classes  
+        - Normalization layers: may have different statistics
+        """
+        filtered_dict = {}
+        excluded_layers = []
+        
+        # Get expected architecture constraints from config if available
+        expected_input_channels = config.get("expected_input_channels", arch_info.get("input_channels"))
+        expected_num_classes = config.get("expected_num_classes", arch_info.get("num_classes"))
+        
+        print(f"[Client {self.client_id}] Filtering parameters with arch constraints:")
+        print(f"  Client input_channels: {arch_info.get('input_channels')}")
+        print(f"  Client num_classes: {arch_info.get('num_classes')}")
+        print(f"  Expected input_channels: {expected_input_channels}")
+        print(f"  Expected num_classes: {expected_num_classes}")
+        
+        for param_name, param_tensor in weights_dict.items():
+            exclude_param = False
+            exclusion_reason = ""
+            
+            # Check for input layer incompatibility
+            # nnUNet typically has input layers with patterns like "encoder.stages.0.0.convs.0.conv.weight"
+            if self._is_input_layer(param_name) and expected_input_channels is not None:
+                if arch_info.get("input_channels") != expected_input_channels:
+                    exclude_param = True
+                    exclusion_reason = f"input channel mismatch: {arch_info.get('input_channels')} vs {expected_input_channels}"
+            
+            # Check for output layer incompatibility
+            # nnUNet output layers typically have patterns like "decoder.stages.*.conv_out.weight" or "seg_layers.*.weight"
+            elif self._is_output_layer(param_name) and expected_num_classes is not None:
+                if arch_info.get("num_classes") != expected_num_classes:
+                    exclude_param = True
+                    exclusion_reason = f"output class mismatch: {arch_info.get('num_classes')} vs {expected_num_classes}"
+            
+            # Check for batch normalization layers (FedBN approach excludes these)
+            elif self._is_batch_norm_layer(param_name):
+                # For now, include BN layers but could exclude for more aggressive filtering
+                # exclude_param = True
+                # exclusion_reason = "batch normalization layer (dataset-specific statistics)"
+                pass
+            
+            if exclude_param:
+                excluded_layers.append((param_name, exclusion_reason))
+                print(f"[Client {self.client_id}] Excluding {param_name}: {exclusion_reason}")
+            else:
+                filtered_dict[param_name] = param_tensor
+        
+        if excluded_layers:
+            print(f"[Client {self.client_id}] Excluded {len(excluded_layers)} incompatible parameters")
+            for param_name, reason in excluded_layers[:5]:  # Show first 5
+                print(f"  - {param_name}: {reason}")
+            if len(excluded_layers) > 5:
+                print(f"  ... and {len(excluded_layers) - 5} more")
+        else:
+            print(f"[Client {self.client_id}] No incompatible parameters detected")
+        
+        return filtered_dict
+    
+    def _is_input_layer(self, param_name: str) -> bool:
+        """Check if parameter belongs to an input layer that's sensitive to input channels."""
+        # nnUNet input layer patterns - be more specific to avoid false positives
+        input_patterns = [
+            "_orig_mod.encoder.stages.0.0.convs.0.conv.weight",  # Main nnUNet input layer
+            "encoder.stages.0.0.convs.0.conv.weight",  # Without torch.compile wrapper
+            "network.encoder.stages.0.0.convs.0.conv.weight",  # Alternative wrapper
+        ]
+        
+        # Check exact matches only - be very strict
+        return param_name in input_patterns
+    
+    def _is_output_layer(self, param_name: str) -> bool:
+        """Check if parameter belongs to an output layer that's sensitive to number of classes."""
+        # nnUNet output layer patterns - be more specific
+        output_patterns = [
+            "_orig_mod.decoder.seg_layers",  # Main segmentation layers
+            "decoder.seg_layers",  # Without torch.compile wrapper
+            "_orig_mod.seg_layers",  # Alternative structure
+            "seg_layers",  # Direct segmentation layers
+        ]
+        
+        # Check if parameter name contains any output pattern
+        for pattern in output_patterns:
+            if pattern in param_name and (".weight" in param_name or ".bias" in param_name):
+                return True
+        
+        return False
+    
+    def _is_batch_norm_layer(self, param_name: str) -> bool:
+        """Check if parameter belongs to a batch normalization layer."""
+        bn_patterns = [
+            "norm.weight", "norm.bias", "norm.running_mean", "norm.running_var",
+            "bn.weight", "bn.bias", "bn.running_mean", "bn.running_var",
+            "batch_norm", "batchnorm",
+            ".norm1.", ".norm2.",  # Transformer-style normalization
+        ]
+        
+        return any(pattern in param_name for pattern in bn_patterns)
+
+    def _log_parameter_structure(self, weights_dict: dict, context: str):
+        """Log detailed parameter structure for debugging."""
+        print(f"\n[Client {self.client_id}] ===== PARAMETER STRUCTURE ({context}) =====")
+        print(f"[Client {self.client_id}] Total parameters: {len(weights_dict)}")
+        
+        # Categorize parameters by type
+        encoder_params = []
+        decoder_params = []
+        seg_layer_params = []
+        transpconv_params = []
+        other_params = []
+        
+        for param_name, param_tensor in weights_dict.items():
+            shape_str = f"{param_tensor.shape}" if hasattr(param_tensor, 'shape') else "unknown"
+            
+            if "_orig_mod.encoder" in param_name or "encoder" in param_name:
+                encoder_params.append((param_name, shape_str))
+            elif "_orig_mod.decoder.seg_layers" in param_name or "seg_layers" in param_name:
+                seg_layer_params.append((param_name, shape_str))
+            elif "_orig_mod.decoder.transpconvs" in param_name or "transpconvs" in param_name:
+                transpconv_params.append((param_name, shape_str))
+            elif "_orig_mod.decoder" in param_name or "decoder" in param_name:
+                decoder_params.append((param_name, shape_str))
+            else:
+                other_params.append((param_name, shape_str))
+        
+        print(f"[Client {self.client_id}] Encoder parameters: {len(encoder_params)}")
+        if encoder_params:
+            print(f"[Client {self.client_id}]   First: {encoder_params[0][0]} -> {encoder_params[0][1]}")
+            print(f"[Client {self.client_id}]   Last:  {encoder_params[-1][0]} -> {encoder_params[-1][1]}")
+        
+        print(f"[Client {self.client_id}] Decoder parameters: {len(decoder_params)}")
+        if decoder_params:
+            print(f"[Client {self.client_id}]   First: {decoder_params[0][0]} -> {decoder_params[0][1]}")
+            print(f"[Client {self.client_id}]   Last:  {decoder_params[-1][0]} -> {decoder_params[-1][1]}")
+        
+        print(f"[Client {self.client_id}] Transpconv parameters: {len(transpconv_params)}")
+        for param_name, shape_str in transpconv_params:
+            print(f"[Client {self.client_id}]   {param_name} -> {shape_str}")
+        
+        print(f"[Client {self.client_id}] Segmentation layer parameters: {len(seg_layer_params)}")
+        for param_name, shape_str in seg_layer_params:
+            print(f"[Client {self.client_id}]   {param_name} -> {shape_str}")
+        
+        if other_params:
+            print(f"[Client {self.client_id}] Other parameters: {len(other_params)}")
+            for param_name, shape_str in other_params[:3]:  # Show first 3
+                print(f"[Client {self.client_id}]   {param_name} -> {shape_str}")
+        
+        print(f"[Client {self.client_id}] =======================================\n")
+
+    def _check_direct_compatibility(self, parameters_dict: dict) -> bool:
+        """Check if parameters can be loaded directly without adaptation."""
+        try:
+            current_weights = self.trainer.get_weights()
+            
+            # Check if all parameters have compatible shapes
+            for param_name, param_value in parameters_dict.items():
+                if param_name not in current_weights:
+                    print(f"[Client {self.client_id}] Parameter {param_name} not found in current model")
+                    return False
+                
+                current_param = current_weights[param_name]
+                
+                if not hasattr(param_value, 'shape') or not hasattr(current_param, 'shape'):
+                    continue
+                
+                if param_value.shape != current_param.shape:
+                    print(f"[Client {self.client_id}] Shape incompatibility: {param_name} {param_value.shape} vs {current_param.shape}")
+                    return False
+            
+            print(f"[Client {self.client_id}] All parameters are directly compatible")
+            return True
+            
+        except Exception as e:
+            print(f"[Client {self.client_id}] Error checking compatibility: {e}")
+            return False
+
+    def _adapt_fedma_parameters(self, fedma_weights: dict, config: dict) -> dict:
+        """
+        Adapt FedMA harmonized parameters to client-specific architecture.
+        Handles channel count differences and class count differences.
+        """
+        current_weights = self.trainer.get_weights()
+        adapted_weights = {}
+        
+        print(f"[Client {self.client_id}] Adapting FedMA parameters to local architecture")
+        print(f"[Client {self.client_id}] FedMA provides {len(fedma_weights)} parameters")
+        print(f"[Client {self.client_id}] Local model expects {len(current_weights)} parameters")
+        
+        # Log parameter structure comparison
+        self._log_parameter_structure(fedma_weights, "FedMA_input")
+        self._log_parameter_structure(current_weights, "Local_model")
+        
+        # Get client architecture info
+        arch_info = self._get_architecture_info()
+        client_input_channels = arch_info.get('input_channels', 1)
+        client_num_classes = arch_info.get('num_classes', 2)
+        
+        for param_name, fedma_param in fedma_weights.items():
+            if param_name not in current_weights:
+                print(f"[Client {self.client_id}] Skipping unknown parameter: {param_name}")
+                continue
+            
+            current_param = current_weights[param_name]
+            
+            # Handle different parameter types
+            if self._is_input_layer(param_name):
+                adapted_param = self._adapt_input_layer(
+                    fedma_param, current_param, client_input_channels
+                )
+            elif self._is_output_layer(param_name):
+                adapted_param = self._adapt_output_layer(
+                    fedma_param, current_param, client_num_classes
+                )
+            else:
+                # Middle layers - use as-is if compatible, otherwise adapt
+                adapted_param = self._adapt_middle_layer(fedma_param, current_param)
+            
+            # Validate adapted parameter before adding
+            if self._validate_adapted_parameter(adapted_param, current_param, param_name):
+                adapted_weights[param_name] = adapted_param
+            else:
+                print(f"[Client {self.client_id}] Validation failed for {param_name}, using current parameter")
+                adapted_weights[param_name] = current_param
+        
+        # Check for missing parameters in the adapted weights
+        missing_params = []
+        for param_name in current_weights.keys():
+            if param_name not in adapted_weights:
+                missing_params.append(param_name)
+        
+        if missing_params:
+            print(f"[Client {self.client_id}] WARNING: {len(missing_params)} parameters will be missing!")
+            print(f"[Client {self.client_id}] Adding missing parameters from current model to prevent errors...")
+            
+            for param_name in missing_params[:10]:  # Show first 10
+                print(f"[Client {self.client_id}]   Missing: {param_name}")
+            if len(missing_params) > 10:
+                print(f"[Client {self.client_id}]   ... and {len(missing_params) - 10} more")
+            
+            # Add missing parameters from current model to prevent loading errors
+            for param_name in missing_params:
+                adapted_weights[param_name] = current_weights[param_name]
+            
+            print(f"[Client {self.client_id}] Added {len(missing_params)} missing parameters from current model")
+        
+        print(f"[Client {self.client_id}] Adapted {len(adapted_weights)} FedMA parameters")
+        print(f"[Client {self.client_id}] Expected {len(current_weights)} parameters")
+        return adapted_weights
+    
+    def _should_attempt_fedma_adaptation(self, parameters_dict: dict) -> bool:
+        """Determine if FedMA adaptation should be attempted or if we should use safer fallback."""
+        try:
+            current_weights = self.trainer.get_weights()
+            
+            # Count major structural differences
+            major_differences = 0
+            
+            # Check if number of parameters is vastly different
+            param_count_ratio = len(parameters_dict) / len(current_weights)
+            if param_count_ratio < 0.5 or param_count_ratio > 2.0:
+                major_differences += 1
+                print(f"[Client {self.client_id}] Major parameter count difference: {len(parameters_dict)} vs {len(current_weights)}")
+            
+            # Check for major architectural differences (decoder stages, transpconvs, seg_layers)
+            current_decoder_stages = len([p for p in current_weights.keys() if "decoder.stages" in p])
+            received_decoder_stages = len([p for p in parameters_dict.keys() if "decoder.stages" in p])
+            
+            current_seg_layers = len([p for p in current_weights.keys() if "seg_layers" in p])
+            received_seg_layers = len([p for p in parameters_dict.keys() if "seg_layers" in p])
+            
+            if abs(current_decoder_stages - received_decoder_stages) > 20:  # Threshold for major difference
+                major_differences += 1
+                print(f"[Client {self.client_id}] Major decoder stage difference: {received_decoder_stages} vs {current_decoder_stages}")
+            
+            if abs(current_seg_layers - received_seg_layers) > 5:  # Threshold for major difference
+                major_differences += 1
+                print(f"[Client {self.client_id}] Major seg_layers difference: {received_seg_layers} vs {current_seg_layers}")
+            
+            # Only attempt FedMA if differences are minor
+            should_attempt = major_differences == 0
+            
+            if not should_attempt:
+                print(f"[Client {self.client_id}] Too many major differences ({major_differences}), using safe fallback")
+            
+            return should_attempt
+            
+        except Exception as e:
+            print(f"[Client {self.client_id}] Error assessing FedMA suitability: {e}")
+            return False
+    
+    def _apply_safe_parameter_loading(self, parameters_dict: dict):
+        """Apply safe parameter loading using only compatible parameters."""
+        try:
+            current_weights = self.trainer.get_weights()
+            compatible_weights = {}
+            
+            # Only use parameters that have exact shape matches
+            compatible_count = 0
+            for param_name, param_value in parameters_dict.items():
+                if param_name in current_weights:
+                    current_param = current_weights[param_name]
+                    if (hasattr(param_value, 'shape') and hasattr(current_param, 'shape') and 
+                        param_value.shape == current_param.shape):
+                        compatible_weights[param_name] = param_value
+                        compatible_count += 1
+            
+            print(f"[Client {self.client_id}] Safe loading: using {compatible_count}/{len(parameters_dict)} compatible parameters")
+            
+            # Load compatible parameters, keep current weights for incompatible ones
+            if compatible_weights:
+                # Create full weight dict with current weights as base
+                full_weights = current_weights.copy()
+                full_weights.update(compatible_weights)
+                self.trainer.set_weights(full_weights)
+                print(f"[Client {self.client_id}] Successfully loaded {len(compatible_weights)} compatible parameters")
+            else:
+                print(f"[Client {self.client_id}] No compatible parameters found, keeping current weights")
+                
+        except Exception as e:
+            print(f"[Client {self.client_id}] Error in safe parameter loading: {e}")
+            print(f"[Client {self.client_id}] Keeping current parameters as fallback")
+    
+    def _validate_adapted_parameter(self, adapted_param, current_param, param_name):
+        """Validate that adapted parameter is compatible with current parameter."""
+        try:
+            # Check basic shape compatibility
+            if not hasattr(adapted_param, 'shape') or not hasattr(current_param, 'shape'):
+                return False
+            
+            if adapted_param.shape != current_param.shape:
+                print(f"[Client {self.client_id}] Shape mismatch for {param_name}: {adapted_param.shape} vs {current_param.shape}")
+                return False
+            
+            # Check for NaN or infinite values
+            import numpy as np
+            if np.any(np.isnan(adapted_param)) or np.any(np.isinf(adapted_param)):
+                print(f"[Client {self.client_id}] Invalid values (NaN/Inf) in adapted parameter {param_name}")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            print(f"[Client {self.client_id}] Validation error for {param_name}: {e}")
+            return False
+    
+    def _adapt_input_layer(self, fedma_param, current_param, client_channels):
+        """Adapt harmonized input layer to client's channel count."""
+        if fedma_param.shape == current_param.shape:
+            return fedma_param
+        
+        fedma_channels = fedma_param.shape[1]
+        
+        if client_channels <= fedma_channels:
+            # Take subset of channels
+            adapted_param = fedma_param[:, :client_channels]
+            print(f"[Client {self.client_id}] Input layer: reduced {fedma_channels} → {client_channels} channels")
+        else:
+            # Need to expand channels - repeat last channel
+            import numpy as np
+            extra_channels = client_channels - fedma_channels
+            last_channel = fedma_param[:, -1:].repeat(extra_channels, axis=1)
+            adapted_param = np.concatenate([fedma_param, last_channel], axis=1)
+            print(f"[Client {self.client_id}] Input layer: expanded {fedma_channels} → {client_channels} channels")
+        
+        return adapted_param
+    
+    def _adapt_output_layer(self, fedma_param, current_param, client_classes):
+        """Adapt harmonized output layer to client's class count."""
+        if fedma_param.shape == current_param.shape:
+            return fedma_param
+        
+        fedma_classes = fedma_param.shape[0]
+        
+        if client_classes <= fedma_classes:
+            # Take subset of classes
+            adapted_param = fedma_param[:client_classes]
+            print(f"[Client {self.client_id}] Output layer: reduced {fedma_classes} → {client_classes} classes")
+        else:
+            # Need to expand classes - initialize new classes with small random values
+            import numpy as np
+            extra_classes = client_classes - fedma_classes
+            new_class_shape = (extra_classes,) + fedma_param.shape[1:]
+            new_classes = np.random.normal(0, 0.01, new_class_shape).astype(fedma_param.dtype)
+            adapted_param = np.concatenate([fedma_param, new_classes], axis=0)
+            print(f"[Client {self.client_id}] Output layer: expanded {fedma_classes} → {client_classes} classes")
+        
+        return adapted_param
+    
+    def _adapt_middle_layer(self, fedma_param, current_param):
+        """Adapt middle layer parameters."""
+        if fedma_param.shape == current_param.shape:
+            return fedma_param
+        
+        # For middle layers with shape mismatches, try adaptive approaches
+        import numpy as np
+        
+        if fedma_param.ndim == current_param.ndim:
+            # Same number of dimensions - try to adapt each dimension
+            adapted_shape = current_param.shape
+            
+            # Simple approach: crop or pad to match current shape
+            slices = []
+            for fedma_dim, current_dim in zip(fedma_param.shape, adapted_shape):
+                if fedma_dim >= current_dim:
+                    # Crop
+                    slices.append(slice(0, current_dim))
+                else:
+                    # Will need padding later
+                    slices.append(slice(None))
+            
+            # Apply cropping
+            adapted_param = fedma_param[tuple(slices)]
+            
+            # Apply padding if needed
+            if adapted_param.shape != adapted_shape:
+                padding = []
+                for adapted_dim, current_dim in zip(adapted_param.shape, adapted_shape):
+                    pad_amount = current_dim - adapted_dim
+                    padding.append((0, max(0, pad_amount)))
+                
+                adapted_param = np.pad(adapted_param, padding, mode='constant', constant_values=0)
+            
+            print(f"[Client {self.client_id}] Middle layer: adapted {fedma_param.shape} → {adapted_shape}")
+            return adapted_param
+        else:
+            # Shape incompatible - use current parameters
+            print(f"[Client {self.client_id}] Middle layer: incompatible shapes {fedma_param.shape} vs {current_param.shape}, keeping current")
+            return current_param
+
     def _count_training_cases(self) -> int:
         """Return number of training cases listed in dataset.json."""
         try:
@@ -227,21 +711,66 @@ class NnUNet3DFullresClient(NumPyClient):
         # Create client-specific subdirectory
         import os
         client_output_dir = os.path.join(output_dir, f"client_{self.client_id}")
-        os.makedirs(client_output_dir, exist_ok=True)
-        self.client_output_dir = client_output_dir
-        print(f"[Client {self.client_id}] Output directory set to: {client_output_dir}")
+        
+        try:
+            os.makedirs(client_output_dir, exist_ok=True)
+            self.client_output_dir = client_output_dir
+            print(f"[Client {self.client_id}] Output directory set to: {client_output_dir}")
+        except PermissionError as e:
+            print(f"[Client {self.client_id}] ERROR: Permission denied creating output directory: {client_output_dir}")
+            print(f"[Client {self.client_id}] Please either:")
+            print(f"[Client {self.client_id}]   1. Set OUTPUT_ROOT environment variable to a writable directory:")
+            print(f"[Client {self.client_id}]      export OUTPUT_ROOT=\"./federated_models\"")
+            print(f"[Client {self.client_id}]   2. Or create the directory with proper permissions:")
+            print(f"[Client {self.client_id}]      sudo mkdir -p {output_dir} && sudo chown $USER {output_dir}")
+            print(f"[Client {self.client_id}] Model saving will be disabled.")
+            self.client_output_dir = None
+        except Exception as e:
+            print(f"[Client {self.client_id}] ERROR: Failed to create output directory: {e}")
+            print(f"[Client {self.client_id}] Model saving will be disabled.")
+            self.client_output_dir = None
 
     def get_parameters(self, config) -> NDArrays:
         """
         Return current model parameters as a list of numpy arrays
         (ordered consistently for Flower).
+        Implements FedBN-style selective parameter exclusion for architecture compatibility.
         """
         if not self.trainer.was_initialized:
             self.trainer.initialize()
 
         weights_dict = self.trainer.get_weights()
-        self.param_keys = list(weights_dict.keys())
-        return list(weights_dict.values())
+        
+        # Log detailed parameter structure for debugging
+        self._log_parameter_structure(weights_dict, "get_parameters")
+        
+        # Check if FedMA harmonization is available
+        fedma_enabled = config.get("fedma_enabled", True)
+        
+        if fedma_enabled:
+            # Use full parameter set for FedMA (it handles harmonization)
+            self.param_keys = list(weights_dict.keys())
+            print(f"[Client {self.client_id}] Using {len(self.param_keys)} parameters for FedMA harmonization")
+            return list(weights_dict.values())
+        else:
+            # Fallback to architecture-aware parameter exclusion
+            exclude_incompatible = config.get("exclude_incompatible_layers", True)
+            
+            if exclude_incompatible:
+                # Get architecture info for compatibility filtering
+                arch_info = self._get_architecture_info()
+                
+                # Filter out parameters that may cause architecture mismatches
+                filtered_weights_dict = self._filter_incompatible_parameters(
+                    weights_dict, arch_info, config
+                )
+                
+                self.param_keys = list(filtered_weights_dict.keys())
+                print(f"[Client {self.client_id}] Using {len(self.param_keys)} compatible parameters (excluded {len(weights_dict) - len(filtered_weights_dict)} incompatible)")
+                return list(filtered_weights_dict.values())
+            else:
+                self.param_keys = list(weights_dict.keys())
+                return list(weights_dict.values())
 
     def fit(self, parameters: NDArrays, config):
         """
@@ -281,6 +810,9 @@ class NnUNet3DFullresClient(NumPyClient):
             # Extract modality information
             modality_info = self._extract_modality_info()
             
+            # Extract architecture information
+            arch_info = self._get_architecture_info()
+            
             metrics = {
                 "client_id": self.client_id,
                 "loss": 0.0,
@@ -289,8 +821,9 @@ class NnUNet3DFullresClient(NumPyClient):
                 "fingerprint_mean": fp_summary.get("mean_intensity", 0.0),
                 "actual_training_cases": actual_training_cases
             }
-            # Add modality information to metrics
+            # Add modality and architecture information to metrics
             metrics.update(modality_info)
+            metrics.update(arch_info)
             return initial_params, actual_training_cases, metrics
         
         # Handle initialization round (federated_round = -1) - apply global fingerprint
@@ -312,7 +845,49 @@ class NnUNet3DFullresClient(NumPyClient):
                 new_sd = {}
                 for k, arr in zip(self.param_keys, parameters):
                     new_sd[k] = arr
-                self.trainer.set_weights(new_sd)
+                
+                # Apply FedMA-aware parameter loading for initialization too
+                fedma_enabled = config.get("fedma_enabled", True)
+                
+                if fedma_enabled:
+                    # First try to load parameters directly to see if they're compatible
+                    compatible_direct = self._check_direct_compatibility(new_sd)
+                    
+                    if compatible_direct:
+                        print(f"[Client {self.client_id}] Initialization parameters are directly compatible, skipping FedMA adaptation")
+                        self.trainer.set_weights(new_sd)
+                    else:
+                        print(f"[Client {self.client_id}] Initialization parameters incompatible")
+                        # Check if we should attempt FedMA adaptation or use safer fallback
+                        if self._should_attempt_fedma_adaptation(new_sd):
+                            print(f"[Client {self.client_id}] Attempting FedMA adaptation for initialization")
+                            adapted_weights = self._adapt_fedma_parameters(new_sd, config)
+                            self.trainer.set_weights(adapted_weights)
+                        else:
+                            print(f"[Client {self.client_id}] Using safe parameter filtering for initialization")
+                            self._apply_safe_parameter_loading(new_sd)
+                else:
+                    # Traditional compatible parameter loading
+                    current_weights = self.trainer.get_weights()
+                    compatible_weights = {}
+                    
+                    for param_name, param_value in new_sd.items():
+                        if param_name in current_weights:
+                            # Check if shapes are compatible
+                            if hasattr(param_value, 'shape') and hasattr(current_weights[param_name], 'shape'):
+                                if param_value.shape == current_weights[param_name].shape:
+                                    compatible_weights[param_name] = param_value
+                                else:
+                                    print(f"[Client {self.client_id}] Skipping {param_name}: shape mismatch {param_value.shape} vs {current_weights[param_name].shape}")
+                            else:
+                                compatible_weights[param_name] = param_value
+                        else:
+                            print(f"[Client {self.client_id}] Skipping {param_name}: not found in current model")
+                    
+                    if len(compatible_weights) < len(new_sd):
+                        print(f"[Client {self.client_id}] Applied {len(compatible_weights)}/{len(new_sd)} compatible parameters")
+                    
+                    self.trainer.set_weights(compatible_weights)
                 
             updated_dict = self.trainer.get_weights()
             updated_params = [updated_dict[k] for k in self.param_keys]
@@ -340,7 +915,49 @@ class NnUNet3DFullresClient(NumPyClient):
             new_sd = {}
             for k, arr in zip(self.param_keys, parameters):
                 new_sd[k] = arr
-            self.trainer.set_weights(new_sd)
+            
+            # Apply FedMA-aware parameter loading
+            fedma_enabled = config.get("fedma_enabled", True)
+            
+            if fedma_enabled:
+                # First try to load parameters directly to see if they're compatible
+                compatible_direct = self._check_direct_compatibility(new_sd)
+                
+                if compatible_direct:
+                    print(f"[Client {self.client_id}] Parameters are directly compatible, skipping FedMA adaptation")
+                    self.trainer.set_weights(new_sd)
+                else:
+                    print(f"[Client {self.client_id}] Incompatible parameters detected")
+                    # Check if we should attempt FedMA adaptation or use safer fallback
+                    if self._should_attempt_fedma_adaptation(new_sd):
+                        print(f"[Client {self.client_id}] Attempting FedMA adaptation")
+                        adapted_weights = self._adapt_fedma_parameters(new_sd, config)
+                        self.trainer.set_weights(adapted_weights)
+                    else:
+                        print(f"[Client {self.client_id}] Using safe parameter filtering instead of FedMA")
+                        self._apply_safe_parameter_loading(new_sd)
+            else:
+                # Traditional compatible parameter loading
+                current_weights = self.trainer.get_weights()
+                compatible_weights = {}
+                
+                for param_name, param_value in new_sd.items():
+                    if param_name in current_weights:
+                        # Check if shapes are compatible
+                        if hasattr(param_value, 'shape') and hasattr(current_weights[param_name], 'shape'):
+                            if param_value.shape == current_weights[param_name].shape:
+                                compatible_weights[param_name] = param_value
+                            else:
+                                print(f"[Client {self.client_id}] Skipping {param_name}: shape mismatch {param_value.shape} vs {current_weights[param_name].shape}")
+                        else:
+                            compatible_weights[param_name] = param_value
+                    else:
+                        print(f"[Client {self.client_id}] Skipping {param_name}: not found in current model")
+                
+                if len(compatible_weights) < len(new_sd):
+                    print(f"[Client {self.client_id}] Applied {len(compatible_weights)}/{len(new_sd)} compatible parameters")
+                
+                self.trainer.set_weights(compatible_weights)
 
         # Local training - use minimal epochs for testing
         local_epochs = config.get("local_epochs", 1)  # Reduced from self.local_epochs_per_round for faster testing
@@ -572,7 +1189,7 @@ def client_fn(context: Context):
         fold = 0
     
     configuration = os.environ.get("NNUNET_CONFIG", "3d_fullres")
-    out_root = os.environ.get("OUTPUT_ROOT", "/local/projects-t3/isaiahlab/nnunet_output")
+    out_root = os.environ.get("OUTPUT_ROOT", "./federated_models")
     output_folder = os.path.join(out_root, f"client_{client_id}")
 
     # Create the client
