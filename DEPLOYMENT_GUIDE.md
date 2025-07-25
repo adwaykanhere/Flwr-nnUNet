@@ -215,7 +215,7 @@ Models are saved to the directory specified by `OUTPUT_ROOT`:
 
 ### Model Saving Requirements
 
-⚠️ **Important**: Models are only saved when the following conditions are met:
+Models are only saved when the following conditions are met:
 1. `OUTPUT_ROOT` environment variable is set
 2. Validation is enabled (models save when validation improves)
 3. Client achieves better validation performance than previous rounds
