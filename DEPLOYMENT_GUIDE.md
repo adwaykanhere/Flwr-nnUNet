@@ -102,11 +102,7 @@ flwr run . deployment
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
-<<<<<<< Updated upstream
-| `OUTPUT_ROOT` | `/local/pathto/nnunet_output` | Directory where models are saved |
-=======
 | `OUTPUT_ROOT` | `./federated_models` | Directory where models are saved |
->>>>>>> Stashed changes
 | `VALIDATE_MODELS` | `false` | Enable validation (required for model saving) |
 
 ### Modality-Aware Aggregation
@@ -164,57 +160,6 @@ The `--node-config` parameter allows you to specify dataset and training configu
 2. **`dataset-name`** - Dataset name from node-config
 3. **Environment variables** - `CLIENT_DATASETS`, `CLIENT_{id}_DATASET`, `TASK_NAME`
 4. **Default fallback** - `Dataset005_Prostate`
-
-### Cross-Validation Folds Explained
-
-nnUNet uses **5-fold cross-validation** where each fold represents a different train/validation split:
-
-- **Fold 0**: ~80% train, ~20% validation (cases vary by split)
-- **Fold 1**: Different 80/20 split with different validation cases
-- **Fold 2-4**: Additional splits ensuring all data is used for validation
-
-**Benefits for Federated Learning:**
-- **Same Dataset, Different Folds**: Simulates different patient populations per institution
-- **Data Diversity**: Each client trains on different subsets, improving federation robustness
-- **Real-world Simulation**: Mimics how different hospitals have different patient cohorts
-
-### Usage Examples
-
-**Multi-Institution Simulation (Same Dataset, Different Folds):**
-```bash
-# Hospital A: Prostate dataset, fold 0
-flower-supernode --insecure --superlink 127.0.0.1:9092 \
-    --clientappio-api-address 127.0.0.1:9094 \
-    --node-config 'partition-id=0 dataset-name="Dataset005_Prostate" fold=0'
-
-# Hospital B: Prostate dataset, fold 1  
-flower-supernode --insecure --superlink 127.0.0.1:9092 \
-    --clientappio-api-address 127.0.0.1:9095 \
-    --node-config 'partition-id=1 dataset-name="Dataset005_Prostate" fold=1'
-
-# Hospital C: Prostate dataset, fold 2
-flower-supernode --insecure --superlink 127.0.0.1:9092 \
-    --clientappio-api-address 127.0.0.1:9096 \
-    --node-config 'partition-id=2 dataset-name="Dataset005_Prostate" fold=2'
-```
-
-**True Multi-Institution (Different Datasets):**
-```bash
-# Hospital A: Prostate dataset
-flower-supernode --insecure --superlink 127.0.0.1:9092 \
-    --clientappio-api-address 127.0.0.1:9094 \
-    --node-config 'partition-id=0 dataset-name="Dataset005_Prostate" fold=0'
-
-# Hospital B: Spleen dataset
-flower-supernode --insecure --superlink 127.0.0.1:9092 \
-    --clientappio-api-address 127.0.0.1:9095 \
-    --node-config 'partition-id=1 dataset-name="Dataset009_Spleen" fold=1'
-
-# Hospital C: Heart dataset with full path
-flower-supernode --insecure --superlink 127.0.0.1:9092 \
-    --clientappio-api-address 127.0.0.1:9096 \
-    --node-config 'partition-id=2 dataset-path="/custom/path/Dataset002_Heart" fold=2'
-```
 
 ## Modality Detection
 
@@ -274,120 +219,6 @@ Models are saved to the directory specified by `OUTPUT_ROOT`:
 1. `OUTPUT_ROOT` environment variable is set
 2. Validation is enabled (models save when validation improves)
 3. Client achieves better validation performance than previous rounds
-
-### Verifying Model Saving
-
-After training completes, verify models were saved:
-```bash
-# Check if models were created
-ls -la $OUTPUT_ROOT/client_*/model_best.pt
-
-# Check model file sizes (should be >100MB for medical models)
-du -sh $OUTPUT_ROOT/client_*/model_best.pt
-```
-
-## Example Commands
-
-### Basic Federated Learning
-
-```bash
-# Simple 2-client setup
-python run_federated_deployment.py --mode run --clients 2 --rounds 3
-```
-
-### Advanced Modality-Aware Setup
-
-```bash
-# CT and MR clients with custom weights
-python run_federated_deployment.py --mode run \
-    --dataset Dataset005_Prostate \
-    --clients 4 --rounds 10 --local-epochs 3 \
-    --enable-modality-aggregation \
-    --modality-weights '{"CT": 0.6, "MR": 0.4}' \
-    --validate --validation-frequency 2 \
-    --output-dir "experiments/modality_aware"
-```
-
-### Distributed Setup (Multiple Machines)
-
-```bash
-# Machine 1 (Server): Start SuperLink
-python run_federated_deployment.py --mode superlink \
-    --superlink-host 0.0.0.0 --superlink-port 9091
-
-# Machine 2 (Client 1): Start SuperNode
-python run_federated_deployment.py --mode supernode \
-    --superlink-host 192.168.1.100 --superlink-port 9091 \
-    --node-id 0 --partition-id 0
-
-# Machine 3 (Client 2): Start SuperNode  
-python run_federated_deployment.py --mode supernode \
-    --superlink-host 192.168.1.100 --superlink-port 9091 \
-    --node-id 1 --partition-id 1
-
-# Machine 1 (Server): Run Federation
-flwr run . deployment
-```
-
-## Troubleshooting
-
-### Common Issues
-
-1. **SuperLink Connection Failed**
-   - Check if SuperLink is running: `netstat -an | grep 9091`
-   - Verify host/port configuration
-   - Ensure firewall allows connections
-
-2. **Client Connection Issues**
-   - Wait 2-3 seconds between starting SuperLink and SuperNodes
-   - Check SuperLink logs for client registration
-   - Verify partition IDs are unique
-
-3. **Modality Detection Issues**
-   - Check `dataset.json` channel_names format
-   - Verify `dataset_fingerprint.json` exists
-   - Enable debug logging to see extracted modality info
-
-4. **Memory Issues**
-   - Reduce batch size or local epochs
-   - Monitor GPU memory usage
-   - Use gradient checkpointing if available
-
-5. **Models Not Being Saved**
-   - **Missing OUTPUT_ROOT**: Ensure `export OUTPUT_ROOT="./federated_models"`
-   - **Validation Disabled**: Models only save during validation rounds with improvement
-   - **Permissions**: Check write permissions: `mkdir -p $OUTPUT_ROOT && touch $OUTPUT_ROOT/test.txt`
-   - **No Validation Improvement**: Models only save when validation Dice score improves
-   - **Check Logs**: Look for "Saved best model checkpoint" in client logs
-
-6. **Permission Denied Errors**
-   ```
-   PermissionError: [Errno 13] Permission denied: '/local'
-   ```
-   **Solutions**:
-   ```bash
-   # Use current directory (recommended)
-   export OUTPUT_ROOT="./federated_models"
-   
-   # Or use home directory
-   export OUTPUT_ROOT="$HOME/federated_models"
-   
-   # For testing, use temporary directory
-   export OUTPUT_ROOT="/tmp/federated_models"
-   ```
-
-### Validation
-
-- Check server logs for modality group formation
-- Verify client modality assignments in preprocessing phase
-- Monitor aggregation strategy selection (traditional vs modality-aware)
-
-## Performance Optimization
-
-- Use SSD storage for dataset access
-- Enable GPU acceleration with `--gpu 0`
-- Adjust `--local-epochs` based on available compute
-- Use `--no-validate` for faster training (validation disabled)
 
 ## Next Steps
 
