@@ -47,7 +47,7 @@ Multi-dataset federation enables federated learning scenarios where:
 - **Traditional FedAvg**: Single dataset, single modality
 - **Modality-Aware**: Single dataset, multiple modalities
 - **Multi-Dataset**: Multiple datasets with cross-dataset modality aggregation
-- **FedMA Architecture Harmonization**: Handles different input channels and output classes
+- **Backbone Aggregation Strategy**: Shares only middle layers while keeping first/last layers local
 
 ### ✅ **Dataset Compatibility Analysis**
 - Automatic compatibility checking between datasets
@@ -73,11 +73,9 @@ export CLIENT_DATASETS='{"0": "Dataset005_Prostate", "1": "Dataset009_Spleen", "
 export ENABLE_MODALITY_AGGREGATION=true
 export MODALITY_WEIGHTS='{"CT": 0.4, "MR": 0.6}'
 
-# Enable FedMA architecture harmonization (default: enabled)
-export ENABLE_FEDMA=true
-export FEDMA_CHANNEL_HARMONIZATION=true  # Handle different input channels
-export FEDMA_CLASS_HARMONIZATION=true    # Handle different output classes
-export FEDMA_LAYER_MATCHING=true         # Enable neuron matching
+# Backbone aggregation strategy (always enabled)
+# First and last layers are trained locally with 10-epoch warmup
+# Only middle layers are shared for global aggregation
 ```
 
 #### Step 2: Start SuperLink (Server)
@@ -379,17 +377,43 @@ flwr run . deployment  # Terminal 6
 
 The system automatically selects the best aggregation strategy:
 
-1. **Traditional FedAvg** (`num_datasets=1, modality_aggregation=false`)
-   - Simple weighted averaging by number of examples
-   - Best for homogeneous setups
+1. **Backbone Aggregation** (always enabled)
+   - Clients warm up first/last layers locally for 10 epochs in round 0
+   - Only middle layers (backbone) are shared and aggregated globally
+   - First and last layers remain client-specific for data heterogeneity
+   - Best for heterogeneous datasets with different input/output structures
 
-2. **Modality-Aware FedAvg** (`num_datasets=1, modality_aggregation=true`)
-   - Aggregates within modalities, then across modalities
-   - Best for single dataset with multiple modalities
+2. **Modality-Aware Backbone Aggregation** (`modality_aggregation=true`)
+   - Combines backbone aggregation with modality-aware grouping
+   - Aggregates backbone within modalities, then across modalities
+   - Best for multi-modal heterogeneous setups
 
-3. **Multi-Dataset Modality-Aware** (`num_datasets>1, modality_aggregation=true`)
-   - Aggregates within dataset-modality groups, then across groups
-   - Best for heterogeneous multi-dataset setups
+3. **Multi-Dataset Backbone Aggregation** (`num_datasets>1`)
+   - Backbone aggregation applied across multiple datasets
+   - Handles different datasets with varying architectures seamlessly
+   - Best for real-world federated medical imaging scenarios
+
+### Backbone Aggregation Warmup Process
+
+The backbone aggregation strategy includes a crucial warmup phase:
+
+#### Round 0: Warmup Phase
+1. **Local Training**: Each client trains first/last layers locally for 10 epochs
+2. **No Global Sharing**: First and last layer weights are never shared with server
+3. **Warmup Flag**: Clients send `is_warmup: true` to indicate warmup status
+4. **Backbone Collection**: Server collects backbone parameters but doesn't aggregate yet
+
+#### Round 1+: Global Aggregation
+1. **Backbone Sharing**: Only middle layer parameters are sent to server
+2. **Global Aggregation**: Server averages backbone parameters across clients
+3. **Local Preservation**: First/last layers remain client-specific throughout training
+4. **Continued Training**: Clients continue local training with updated global backbone
+
+#### Benefits of Warmup Strategy
+- **Data Heterogeneity**: Handles different input channels and output classes seamlessly
+- **Architecture Flexibility**: No need for manual architecture harmonization
+- **Performance**: Maintains local adaptation while gaining from global knowledge
+- **Simplicity**: Eliminates complex parameter matching and harmonization
 
 ### Custom Aggregation Weights
 
