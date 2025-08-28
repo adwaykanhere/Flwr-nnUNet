@@ -52,6 +52,9 @@ class ModalityAwareFederatedStrategy(FedAvg):
         
         # Warmup tracking for backbone aggregation strategy
         self.client_warmup_status: Dict[str, bool] = {}  # client_id -> is_warmed_up
+
+        # Track common parameter names from the last aggregation round
+        self.last_common_param_names: List[str] = []
         
         # Create global models directory
         os.makedirs(self.global_models_dir, exist_ok=True)
@@ -186,16 +189,12 @@ class ModalityAwareFederatedStrategy(FedAvg):
                 if compatible_params and len(compatible_params) > 0:
                     print(f"[Server] Modality {modality}: aggregating {len(compatible_params)} common parameters")
                     aggregated_param_dict = self._asymmetric_weighted_average(client_info, compatible_params)
-                    # Convert back to list format using first client's parameter order
-                    first_client_id = list(client_info.keys())[0]
-                    first_client_names = client_info[first_client_id]["param_names"]
-                    aggregated_params = [aggregated_param_dict.get(name, client_info[first_client_id]["parameters"][i]) 
-                                       for i, name in enumerate(first_client_names)]
+                    common_param_names = sorted(compatible_params.keys())
+                    aggregated_params = [aggregated_param_dict[name] for name in common_param_names]
+                    self.last_common_param_names = common_param_names
                 else:
-                    # No common parameters - use intelligent fallback
-                    print(f"[Server] Modality {modality}: no common parameters found, using fallback")
-                    aggregated_params, fallback_summary = self._intelligent_fallback_aggregation(client_info, {})
-                    print(f"[Server] Modality {modality} fallback: {fallback_summary.get('aggregation_method', 'unknown')}")
+                    print(f"[Server] Modality {modality}: no common parameters found")
+                    return None, {}
             else:
                 aggregated_params = self._weighted_average(modality_params_and_weights)
         else:
@@ -262,16 +261,12 @@ class ModalityAwareFederatedStrategy(FedAvg):
                 if compatible_params and len(compatible_params) > 0:
                     print(f"[Server] Dataset-modality {signature}: aggregating {len(compatible_params)} common parameters")
                     aggregated_param_dict = self._asymmetric_weighted_average(client_info, compatible_params)
-                    # Convert back to list format using first client's parameter order
-                    first_client_id = list(client_info.keys())[0]
-                    first_client_names = client_info[first_client_id]["param_names"]
-                    aggregated_params = [aggregated_param_dict.get(name, client_info[first_client_id]["parameters"][i]) 
-                                       for i, name in enumerate(first_client_names)]
+                    common_param_names = sorted(compatible_params.keys())
+                    aggregated_params = [aggregated_param_dict[name] for name in common_param_names]
+                    self.last_common_param_names = common_param_names
                 else:
-                    # No common parameters - use intelligent fallback
-                    print(f"[Server] Dataset-modality {signature}: no common parameters found, using fallback")
-                    aggregated_params, fallback_summary = self._intelligent_fallback_aggregation(client_info, {})
-                    print(f"[Server] Dataset-modality {signature} fallback: {fallback_summary.get('aggregation_method', 'unknown')}")
+                    print(f"[Server] Dataset-modality {signature}: no common parameters found")
+                    return None, {}
             else:
                 aggregated_params = self._weighted_average(group_params_and_weights)
         else:
