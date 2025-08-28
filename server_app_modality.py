@@ -52,6 +52,9 @@ class ModalityAwareFederatedStrategy(FedAvg):
         
         # Warmup tracking for backbone aggregation strategy
         self.client_warmup_status: Dict[str, bool] = {}  # client_id -> is_warmed_up
+
+        # Track names of parameters successfully aggregated in the last round
+        self.last_common_param_names: List[str] = []
         
         # Create global models directory
         os.makedirs(self.global_models_dir, exist_ok=True)
@@ -875,7 +878,11 @@ class ModalityAwareFederatedStrategy(FedAvg):
             is_bn = compatible_params[param_name].get("is_batchnorm_learnable", False)
             bn_flag = " (BatchNorm)" if is_bn else ""
             print(f"[Server] Aggregated: {param_name} -> {shape}{bn_flag}")
-        
+
+        # Update last_common_param_names with aggregated parameter names
+        existing = set(getattr(self, "last_common_param_names", []))
+        self.last_common_param_names = list(existing.union(aggregated_params.keys()))
+
         return aggregated_params
 
     def _intelligent_fallback_aggregation(self, client_info: Dict, compatible_params: Dict) -> Tuple[NDArrays, Dict]:
@@ -1106,6 +1113,9 @@ class ModalityAwareFederatedStrategy(FedAvg):
             "exclude_incompatible_layers": True,  # Enable architecture-aware parameter filtering
             "backbone_aggregation": True,  # Enable backbone-only aggregation
         }
+
+        if hasattr(self, "last_common_param_names"):
+            config["param_names_str"] = json.dumps(self.last_common_param_names)
         
         # Call parent's configure_fit method
         fit_ins = super().configure_fit(server_round, parameters, client_manager)
@@ -1125,6 +1135,9 @@ class ModalityAwareFederatedStrategy(FedAvg):
         failures: List[BaseException],
     ):
         print(f"[Server] Round {server_round} results: {len(results)} successes, {len(failures)} failures.")
+
+        # Reset tracking of common parameter names for this round
+        self.last_common_param_names = []
         
         # Determine federated round
         if server_round == 1:
@@ -1259,7 +1272,15 @@ class ModalityAwareFederatedStrategy(FedAvg):
                 print(f"[Server] Performing traditional FedAvg aggregation (enable_modality_aggregation={self.enable_modality_aggregation})...")
                 aggregated_result = super().aggregate_fit(server_round, results, failures)
                 global_summary = {'aggregation_method': 'traditional_fedavg'}
-            
+
+                # Update last_common_param_names from client metadata if available
+                if results:
+                    param_names_str = results[0][1].metrics.get("param_names_str", "[]")
+                    try:
+                        self.last_common_param_names = json.loads(param_names_str) if param_names_str else []
+                    except json.JSONDecodeError:
+                        self.last_common_param_names = []
+                
             # Save global model if validation improved
             if client_validation_scores and aggregated_result is not None:
                 avg_validation_dice = sum(client_validation_scores) / len(client_validation_scores)
