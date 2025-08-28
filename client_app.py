@@ -9,6 +9,7 @@ from flwr.client import ClientApp, NumPyClient
 from flwr.common import Context, NDArrays
 
 from task import FedNnUNetTrainer
+from wandb_integration import get_wandb_logger
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -64,12 +65,36 @@ class NnUNet3DFullresClient(NumPyClient):
         with open(dataset_json, "r") as f:
             dataset_dict = json.load(f)
         
+        # Extract dataset name from dataset_json or fallback to folder name
+        dataset_name = dataset_dict.get("name", os.path.basename(os.path.dirname(dataset_json)))
+        self.dataset_name = dataset_name
+        
+        # Try to extract modality from dataset metadata
+        modality = None
+        if "modality" in dataset_dict:
+            modality = dataset_dict["modality"]
+        elif "channel_names" in dataset_dict and dataset_dict["channel_names"]:
+            # Infer modality from channel names if available
+            channel_names = dataset_dict["channel_names"]
+            if isinstance(channel_names, dict) and "0" in channel_names:
+                modality = channel_names["0"]
+            elif isinstance(channel_names, list) and len(channel_names) > 0:
+                modality = channel_names[0]
+        self.modality = modality
+        
         self.trainer = FedNnUNetTrainer(
             plans=plans_dict,
             configuration=configuration,
             fold=fold,
             dataset_json=dataset_dict,
             device=torch.device("cuda:0"),
+        )
+        
+        # Setup wandb logging with federated parameters
+        self.trainer.setup_wandb_logging(
+            client_id=client_id,
+            dataset_name=dataset_name,
+            modality=modality
         )
         self.trainer.max_num_epochs = max_total_epochs
         self.local_epochs_per_round = local_epochs_per_round
@@ -86,6 +111,33 @@ class NnUNet3DFullresClient(NumPyClient):
         self.best_validation_dice = 0.0
         self.best_round = 0
         self.output_dir = None
+        
+        # Initialize wandb logger for client-level logging
+        self.wandb_logger = get_wandb_logger(
+            run_type="client",
+            client_id=client_id,
+            dataset_name=dataset_name,
+            modality=modality,
+            project_suffix="client"
+        )
+        
+        # Initialize warmup and training state
+        self.is_warmed_up = False
+        self.warmup_epochs = int(os.environ.get('WARMUP_EPOCHS', 2))
+        
+        # Log initial client configuration
+        if self.wandb_logger.enabled:
+            client_config = {
+                "client/id": client_id,
+                "client/dataset_name": dataset_name,
+                "client/modality": modality,
+                "client/configuration": configuration,
+                "client/fold": fold,
+                "client/max_epochs": max_total_epochs,
+                "client/local_epochs_per_round": local_epochs_per_round,
+                "client/num_training_cases": self.num_training_cases
+            }
+            self.wandb_logger.log_metrics(client_config)
 
     def _load_local_fingerprint(self) -> dict:
         if self.dataset_fingerprint_path and os.path.exists(self.dataset_fingerprint_path):
@@ -172,6 +224,25 @@ class NnUNet3DFullresClient(NumPyClient):
         
         return modality_info
 
+    def _get_architecture_signature(self) -> str:
+        """
+        Generate a unique signature for this client's architecture.
+        Used for compatibility checking during aggregation.
+        """
+        arch_info = self._get_architecture_info()
+        input_channels = arch_info.get('input_channels', 1)
+        num_classes = arch_info.get('num_classes', 2)
+        patch_size = arch_info.get('patch_size', [160, 160, 160])
+        
+        # Create a deterministic signature
+        signature_parts = [
+            f"in{input_channels}",
+            f"out{num_classes}", 
+            f"patch{patch_size[0]}x{patch_size[1]}x{patch_size[2]}" if len(patch_size) >= 3 else f"patch{patch_size}"
+        ]
+        
+        return "_".join(signature_parts)
+
     def _get_architecture_info(self) -> dict:
         """Extract architecture information for compatibility checking."""
         arch_info = {}
@@ -189,14 +260,16 @@ class NnUNet3DFullresClient(NumPyClient):
             labels = dataset_dict.get("labels", {})
             # Background is typically label 0, so num_classes = max_label + 1
             if labels:
-                label_values = []
+                max_label = 0
                 for label_name, label_value in labels.items():
                     if isinstance(label_value, (int, float)):
-                        label_values.append(int(label_value))
+                        max_label = max(max_label, int(label_value))
                     elif isinstance(label_value, list) and len(label_value) > 0:
-                        label_values.extend([int(x) for x in label_value if isinstance(x, (int, float))])
+                        for x in label_value:
+                            if isinstance(x, (int, float)):
+                                max_label = max(max_label, int(x))
                 
-                arch_info["num_classes"] = max(label_values) + 1 if label_values else 2
+                arch_info["num_classes"] = max_label + 1 if max_label > 0 else 2
             else:
                 arch_info["num_classes"] = 2  # Default binary segmentation
             
@@ -205,7 +278,7 @@ class NnUNet3DFullresClient(NumPyClient):
                 if hasattr(self.trainer, 'configuration_manager'):
                     patch_size = getattr(self.trainer.configuration_manager, 'patch_size', None)
                     if patch_size:
-                        arch_info["patch_size"] = list(patch_size)
+                        arch_info["patch_size"] = str(list(patch_size))
             
             print(f"[Client {self.client_id}] Architecture info: {arch_info}")
             
@@ -214,67 +287,143 @@ class NnUNet3DFullresClient(NumPyClient):
             arch_info = {
                 "input_channels": 1,
                 "num_classes": 2,
-                "patch_size": [20, 160, 160]  # Default 3D patch size
+                "patch_size": "[20, 160, 160]"  # Default 3D patch size
             }
         
         return arch_info
 
-    def _filter_backbone_parameters(self, weights_dict: dict) -> dict:
+    def _filter_common_backbone_parameters(self, weights_dict: dict) -> dict:
         """
-        Filter parameters to exclude first and last layers, keeping only backbone layers.
-        For the new aggregation strategy where only middle layers are shared.
+        Filter parameters to only include common backbone layers.
+        Uses simple exclusion rules following FednnUNet reference implementation.
+        Returns: {param_name: parameter} - using original parameter names
         """
         backbone_dict = {}
         excluded_layers = []
         
         for param_name, param_tensor in weights_dict.items():
-            exclude_param = False
-            exclusion_reason = ""
-            
-            # Exclude first layer (input layer)
-            if self._is_input_layer(param_name):
-                exclude_param = True
-                exclusion_reason = "first layer (input layer)"
-            # Exclude last layer (output layer)
-            elif self._is_output_layer(param_name):
-                exclude_param = True
-                exclusion_reason = "last layer (output layer)"
-            
-            if exclude_param:
-                excluded_layers.append((param_name, exclusion_reason))
-                print(f"[Client {self.client_id}] Excluding {param_name}: {exclusion_reason}")
-            else:
+            # Check if this is a common backbone layer using simple rules
+            if self._is_common_backbone_layer(param_name):
                 backbone_dict[param_name] = param_tensor
+            else:
+                excluded_layers.append((param_name, "ARCHITECTURE_SPECIFIC", param_tensor.shape if hasattr(param_tensor, 'shape') else 'unknown'))
         
-        print(f"[Client {self.client_id}] Backbone filtering: using {len(backbone_dict)}/{len(weights_dict)} parameters")
-        print(f"[Client {self.client_id}] Excluded {len(excluded_layers)} first/last layer parameters")
+        print(f"[Client {self.client_id}] Common backbone filtering: {len(backbone_dict)}/{len(weights_dict)} parameters")
+        print(f"[Client {self.client_id}] Excluded {len(excluded_layers)} architecture-specific parameters")
+        
+        # COMPREHENSIVE LOGGING for debugging parameter filtering
+        print(f"\n[Client {self.client_id}] ===== PARAMETER FILTERING DETAILS =====")
+        
+        # Log all excluded parameters with detailed reasons
+        if excluded_layers:
+            print(f"[Client {self.client_id}] EXCLUDED parameters ({len(excluded_layers)}):")
+            for param_name, reason, shape in excluded_layers:
+                is_input = self._is_input_layer(param_name)
+                is_output = self._is_output_layer(param_name)
+                exclusion_detail = []
+                if is_input: exclusion_detail.append("INPUT_LAYER")
+                if is_output: exclusion_detail.append("OUTPUT_LAYER")
+                if not is_input and not is_output: exclusion_detail.append("NOT_BACKBONE")
+                print(f"[Client {self.client_id}]   ❌ {param_name} -> {shape} ({'/'.join(exclusion_detail)})")
+        
+        # Log all included parameters with their categorization
+        if backbone_dict:
+            print(f"[Client {self.client_id}] INCLUDED parameters ({len(backbone_dict)}):")
+            for param_name, param_tensor in backbone_dict.items():
+                shape = param_tensor.shape if hasattr(param_tensor, 'shape') else 'unknown'
+                category = "UNKNOWN"
+                if "stages.1" in param_name or "stages.2" in param_name: category = "MIDDLE_ENCODER"
+                elif "stages.3" in param_name or "stages.4" in param_name: category = "DEEP_ENCODER"
+                elif "decoder.stages" in param_name: category = "DECODER_BACKBONE"
+                elif "transpconv" in param_name: category = "TRANSPOSE_CONV"
+                elif self._is_batch_norm_layer(param_name): category = "BATCH_NORM"
+                print(f"[Client {self.client_id}]   ✅ {param_name} -> {shape} ({category})")
+        
+        print(f"[Client {self.client_id}] =======================================\n")
+        
+        # Final validation: ensure we have at least some parameters
+        if len(backbone_dict) == 0:
+            print(f"[Client {self.client_id}] CRITICAL ERROR: No backbone parameters identified!")
+            print(f"[Client {self.client_id}] This will cause ClientAppOutputs error.")
         
         return backbone_dict
+
+    def _filter_backbone_parameters(self, weights_dict: dict) -> dict:
+        """
+        Legacy method for backward compatibility - now delegates to simplified implementation.
+        """
+        return self._filter_common_backbone_parameters(weights_dict)
     
     def _is_input_layer(self, param_name: str) -> bool:
         """Check if parameter belongs to an input layer that's sensitive to input channels."""
-        # nnUNet input layer patterns - be more specific to avoid false positives
+        # nnUNet input layer patterns - comprehensive list including various wrappers
         input_patterns = [
-            "_orig_mod.encoder.stages.0.0.convs.0.conv.weight",  # Main nnUNet input layer
+            "_orig_mod.encoder.stages.0.0.convs.0.conv.weight",  # Main nnUNet input layer (torch.compile)
+            "_orig_mod.encoder.stages.0.0.convs.0.conv.bias",    # Input layer bias
             "encoder.stages.0.0.convs.0.conv.weight",  # Without torch.compile wrapper
+            "encoder.stages.0.0.convs.0.conv.bias",    # Input layer bias (no wrapper)
             "network.encoder.stages.0.0.convs.0.conv.weight",  # Alternative wrapper
+            "network.encoder.stages.0.0.convs.0.conv.bias",    # Alternative wrapper bias
+            "model.encoder.stages.0.0.convs.0.conv.weight",    # Model wrapper
+            "model.encoder.stages.0.0.convs.0.conv.bias",      # Model wrapper bias
+            # Additional first stage patterns
+            "_orig_mod.encoder.stages.0.1.convs.0.conv.weight",  # First stage second block
+            "_orig_mod.encoder.stages.0.1.convs.0.conv.bias",
+            "encoder.stages.0.1.convs.0.conv.weight",
+            "encoder.stages.0.1.convs.0.conv.bias",
         ]
         
-        # Check exact matches only - be very strict
-        return param_name in input_patterns
+        # Also check for first encoder stage patterns (broader match for safety)
+        first_stage_patterns = [
+            "encoder.stages.0.0",  # First convolution block
+            "_orig_mod.encoder.stages.0.0",  # With wrapper
+            "network.encoder.stages.0.0",   # Alternative wrapper
+            "model.encoder.stages.0.0",     # Model wrapper
+        ]
+        
+        # Check exact matches first
+        if param_name in input_patterns:
+            return True
+            
+        # Check for first stage patterns with conv layers
+        for pattern in first_stage_patterns:
+            if pattern in param_name and "convs.0.conv" in param_name and (".weight" in param_name or ".bias" in param_name):
+                return True
+                
+        return False
     
     def _is_output_layer(self, param_name: str) -> bool:
         """Check if parameter belongs to an output layer that's sensitive to number of classes."""
-        # nnUNet output layer patterns - be more specific
+        # nnUNet output layer patterns - comprehensive list including various wrappers
         output_patterns = [
-            "_orig_mod.decoder.seg_layers",  # Main segmentation layers
+            "_orig_mod.decoder.seg_layers",  # Main segmentation layers (torch.compile)
             "decoder.seg_layers",  # Without torch.compile wrapper
             "_orig_mod.seg_layers",  # Alternative structure
             "seg_layers",  # Direct segmentation layers
+            "network.decoder.seg_layers",  # Network wrapper
+            "model.decoder.seg_layers",    # Model wrapper
+            "network.seg_layers",          # Network wrapper alternative
+            "model.seg_layers",            # Model wrapper alternative
+            # Additional output patterns
+            "output_layer", "final_layer", "classifier", "head"
+        ]
+        
+        # Also check for final output layer patterns (typically the last segmentation layer)
+        final_output_patterns = [
+            "seg_layers.4",  # Common final segmentation layer index
+            "seg_layers.3",  # Alternative final layer
+            "seg_layers.2",  # Alternative final layer
+            "final_layer",   # Explicit final layer naming
+            "output_layer",  # Explicit output layer naming
         ]
         
         # Check if parameter name contains any output pattern
         for pattern in output_patterns:
+            if pattern in param_name and (".weight" in param_name or ".bias" in param_name):
+                return True
+        
+        # Check for final output patterns
+        for pattern in final_output_patterns:
             if pattern in param_name and (".weight" in param_name or ".bias" in param_name):
                 return True
         
@@ -291,14 +440,221 @@ class NnUNet3DFullresClient(NumPyClient):
         
         return any(pattern in param_name for pattern in bn_patterns)
 
+    def _has_architecture_dependent_shape(self, param_name: str, param_tensor) -> bool:
+        """Check if parameter has architecture-dependent shape based on known patterns."""
+        if not hasattr(param_tensor, 'shape'):
+            return False
+            
+        shape = param_tensor.shape
+        
+        # Input layer heuristics: typically has shape related to input channels
+        # Common nnUNet input layer shapes: (out_channels, in_channels, kernel...)
+        if len(shape) >= 2:
+            # Check if this looks like an input convolution (small input channel dimension)
+            in_channels = shape[1] if len(shape) > 1 else shape[0]
+            if in_channels <= 5:  # Typical medical imaging: 1-4 input channels
+                # Additional check: parameter name suggests input layer
+                input_indicators = ["stages.0.0", "convs.0.conv", "first", "input"]
+                if any(indicator in param_name.lower() for indicator in input_indicators):
+                    return True
+        
+        # Output layer heuristics: typically has shape related to number of classes
+        # Common nnUNet output layer shapes: (num_classes, features, kernel...)
+        if len(shape) >= 1:
+            # Check if this looks like an output layer (small output channel dimension)
+            out_channels = shape[0]
+            if out_channels <= 20:  # Typical segmentation: 2-10 classes
+                # Additional check: parameter name suggests output layer
+                output_indicators = ["seg_layers", "final", "output", "classifier"]
+                if any(indicator in param_name.lower() for indicator in output_indicators):
+                    return True
+        
+        return False
+
+    def _convert_to_semantic_name(self, param_name: str) -> str:
+        """
+        Convert PyTorch parameter names to semantic names that can be matched across architectures.
+        This enables common layer detection across heterogeneous client architectures.
+        """
+        # Remove common wrappers first
+        semantic_name = param_name
+        wrappers = ["_orig_mod.", "network.", "model."]
+        for wrapper in wrappers:
+            if semantic_name.startswith(wrapper):
+                semantic_name = semantic_name[len(wrapper):]
+                break
+        
+        # Handle encoder layers
+        if "encoder.stages." in semantic_name:
+            # Pattern: encoder.stages.0.0.convs.0.conv.weight -> enc_s0_b0_conv0_w
+            parts = semantic_name.split(".")
+            try:
+                stage_idx = None
+                block_idx = None
+                conv_idx = None
+                param_type = None
+                
+                for i, part in enumerate(parts):
+                    if part == "encoder" and i + 2 < len(parts) and parts[i + 1] == "stages":
+                        stage_idx = parts[i + 2]
+                        if i + 3 < len(parts):
+                            block_idx = parts[i + 3]
+                    elif part == "convs" and i + 1 < len(parts):
+                        conv_idx = parts[i + 1]
+                    elif part in ["weight", "bias"]:
+                        param_type = "w" if part == "weight" else "b"
+                    elif part == "conv":
+                        continue  # Skip conv identifier
+                    elif part in ["norm", "bn", "batch_norm"]:
+                        param_type = "norm_" + (param_type or "w")
+                
+                if stage_idx is not None and block_idx is not None:
+                    semantic_parts = [f"enc_s{stage_idx}_b{block_idx}"]
+                    if conv_idx is not None:
+                        semantic_parts.append(f"conv{conv_idx}")
+                    if param_type:
+                        semantic_parts.append(param_type)
+                    return "_".join(semantic_parts)
+            except (IndexError, ValueError):
+                pass
+        
+        # Handle decoder layers (excluding seg_layers which are architecture-specific)
+        if "decoder." in semantic_name and "seg_layers" not in semantic_name:
+            parts = semantic_name.split(".")
+            try:
+                if "transpconvs" in semantic_name:
+                    # Pattern: decoder.transpconvs.0.weight -> dec_transpconv0_w
+                    for i, part in enumerate(parts):
+                        if part == "transpconvs" and i + 1 < len(parts):
+                            layer_idx = parts[i + 1]
+                            param_type = "w" if semantic_name.endswith("weight") else "b"
+                            return f"dec_transpconv{layer_idx}_{param_type}"
+                else:
+                    # Regular decoder layers
+                    stage_idx = None
+                    block_idx = None
+                    conv_idx = None
+                    param_type = None
+                    
+                    for i, part in enumerate(parts):
+                        if part == "stages" and i + 1 < len(parts):
+                            stage_idx = parts[i + 1]
+                            if i + 2 < len(parts):
+                                block_idx = parts[i + 2]
+                        elif part == "convs" and i + 1 < len(parts):
+                            conv_idx = parts[i + 1]
+                        elif part in ["weight", "bias"]:
+                            param_type = "w" if part == "weight" else "b"
+                        elif part in ["norm", "bn"]:
+                            param_type = "norm_" + (param_type or "w")
+                    
+                    if stage_idx is not None:
+                        semantic_parts = [f"dec_s{stage_idx}"]
+                        if block_idx is not None:
+                            semantic_parts.append(f"b{block_idx}")
+                        if conv_idx is not None:
+                            semantic_parts.append(f"conv{conv_idx}")
+                        if param_type:
+                            semantic_parts.append(param_type)
+                        return "_".join(semantic_parts)
+            except (IndexError, ValueError):
+                pass
+        
+        # Skip architecture-dependent layers entirely
+        if self._is_input_layer(param_name) or self._is_output_layer(param_name):
+            return None  # Don't include in common parameters
+        
+        # Fallback: create a simplified semantic name for unmatched patterns
+        # Remove common suffixes and normalize
+        simplified = semantic_name.replace(".", "_")
+        simplified = simplified.replace("weight", "w").replace("bias", "b")
+        
+        # If it's clearly a backbone layer, return simplified name
+        if any(indicator in simplified.lower() for indicator in ["encoder", "decoder", "conv", "norm", "bn"]):
+            return f"backbone_{simplified}"
+        
+        # If we can't classify it, return None to exclude it
+        return None
+
+    def _is_common_backbone_layer(self, param_name: str) -> bool:
+        """
+        Check if a parameter belongs to the common backbone (shared across architectures).
+        Uses a whitelist approach to identify definitely shareable layers.
+        """
+        # WHITELIST APPROACH: Only include layers we're confident are shareable
+        
+        # 1. EXCLUDE input layers (architecture-specific)
+        if self._is_input_layer(param_name):
+            return False
+            
+        # 2. EXCLUDE output layers (architecture-specific)  
+        if self._is_output_layer(param_name):
+            return False
+        
+        # 3. INCLUDE ONLY middle encoder layers (stages 1-3, EXCLUDE stage 0 and final stages)
+        middle_encoder_patterns = [
+            "encoder.stages.1", "encoder.stages.2", "encoder.stages.3",
+            "_orig_mod.encoder.stages.1", "_orig_mod.encoder.stages.2", 
+            "_orig_mod.encoder.stages.3",
+            "network.encoder.stages.1", "network.encoder.stages.2",
+            "network.encoder.stages.3",
+            "model.encoder.stages.1", "model.encoder.stages.2",
+            "model.encoder.stages.3"
+        ]
+        
+        for pattern in middle_encoder_patterns:
+            if pattern in param_name:
+                return True
+        
+        # 4. INCLUDE ONLY middle decoder layers (excluding first decoder stage and seg_layers)
+        decoder_backbone_patterns = [
+            "decoder.stages.1", "decoder.stages.2", "decoder.stages.3",
+            "_orig_mod.decoder.stages.1", "_orig_mod.decoder.stages.2", 
+            "_orig_mod.decoder.stages.3",
+            "network.decoder.stages.1", "network.decoder.stages.2",
+            "network.decoder.stages.3",
+            "model.decoder.stages.1", "model.decoder.stages.2",
+            "model.decoder.stages.3",
+            # Transpose convolutions (middle layers only)
+            "decoder.transpconvs.1", "decoder.transpconvs.2", "decoder.transpconvs.3",
+            "_orig_mod.decoder.transpconvs.1", "_orig_mod.decoder.transpconvs.2",
+            "_orig_mod.decoder.transpconvs.3"
+        ]
+        
+        for pattern in decoder_backbone_patterns:
+            if pattern in param_name and "seg_layers" not in param_name:
+                return True
+        
+        # 5. INCLUDE batch normalization layers (always shareable)
+        if self._is_batch_norm_layer(param_name):
+            return True
+        
+        # 6. INCLUDE ONLY middle convolution layers (stages 1-3, NOT first or last)
+        if ("conv" in param_name.lower() and 
+            not self._is_input_layer(param_name) and 
+            not self._is_output_layer(param_name) and
+            any(stage in param_name for stage in ["stages.1", "stages.2", "stages.3"]) and
+            "stages.0" not in param_name):  # Explicitly exclude stage 0 (first layer)
+            return True
+        
+        # 7. DEFAULT: Exclude everything else to be safe
+        return False
+
     def _log_parameter_structure(self, weights_dict: dict, context: str):
         """Log detailed parameter structure for debugging."""
-        print(f"\n[Client {self.client_id}] ===== PARAMETER STRUCTURE ({context}) =====")
+        print(f"\n[Client {self.client_id}] ===== 3D MODEL ARCHITECTURE ({context}) =====")
         print(f"[Client {self.client_id}] Total parameters: {len(weights_dict)}")
+        print(f"[Client {self.client_id}] Architecture: 3D nnUNet")
         
-        # Categorize parameters by type
+        # Extract architecture info
+        arch_info = self._get_architecture_info()
+        print(f"[Client {self.client_id}] Input channels: {arch_info.get('input_channels', 'unknown')}")
+        print(f"[Client {self.client_id}] Output classes: {arch_info.get('num_classes', 'unknown')}")
+        print(f"[Client {self.client_id}] Patch size: {arch_info.get('patch_size', 'unknown')}")
+        
+        # Categorize parameters by type and mark exclusion status
         encoder_params = []
-        decoder_params = []
+        decoder_backbone_params = []
         seg_layer_params = []
         transpconv_params = []
         other_params = []
@@ -306,68 +662,130 @@ class NnUNet3DFullresClient(NumPyClient):
         for param_name, param_tensor in weights_dict.items():
             shape_str = f"{param_tensor.shape}" if hasattr(param_tensor, 'shape') else "unknown"
             
-            if "_orig_mod.encoder" in param_name or "encoder" in param_name:
-                encoder_params.append((param_name, shape_str))
-            elif "_orig_mod.decoder.seg_layers" in param_name or "seg_layers" in param_name:
-                seg_layer_params.append((param_name, shape_str))
-            elif "_orig_mod.decoder.transpconvs" in param_name or "transpconvs" in param_name:
-                transpconv_params.append((param_name, shape_str))
-            elif "_orig_mod.decoder" in param_name or "decoder" in param_name:
-                decoder_params.append((param_name, shape_str))
+            # Determine exclusion status for this parameter
+            exclusion_type = ""
+            if self._is_input_layer(param_name):
+                exclusion_type = "INPUT_LAYER"
+            elif self._is_output_layer(param_name):
+                exclusion_type = "OUTPUT_LAYER"
+            elif self._has_architecture_dependent_shape(param_name, param_tensor):
+                exclusion_type = "ARCHITECTURE_DEPENDENT"
             else:
-                other_params.append((param_name, shape_str))
+                exclusion_type = "BACKBONE" if "_orig_mod.decoder" in param_name or "decoder" in param_name else "ENCODER"
+                if "_orig_mod.decoder.transpconvs" in param_name or "transpconvs" in param_name:
+                    exclusion_type = "TRANSPCONV"
+            
+            param_info = (param_name, shape_str, exclusion_type)
+            
+            if "_orig_mod.encoder" in param_name or ("encoder" in param_name and "decoder.encoder" not in param_name):
+                encoder_params.append(param_info)
+            elif "_orig_mod.decoder.seg_layers" in param_name or "seg_layers" in param_name:
+                seg_layer_params.append(param_info)
+            elif "_orig_mod.decoder.transpconvs" in param_name or "transpconvs" in param_name:
+                transpconv_params.append(param_info)
+            elif "_orig_mod.decoder" in param_name or "decoder" in param_name:
+                decoder_backbone_params.append(param_info)
+            else:
+                other_params.append(param_info)
         
         print(f"[Client {self.client_id}] Encoder parameters: {len(encoder_params)}")
         if encoder_params:
-            print(f"[Client {self.client_id}]   First: {encoder_params[0][0]} -> {encoder_params[0][1]}")
-            print(f"[Client {self.client_id}]   Last:  {encoder_params[-1][0]} -> {encoder_params[-1][1]}")
+            first = encoder_params[0]
+            last = encoder_params[-1]
+            print(f"[Client {self.client_id}]   First: {first[0]} -> {first[1]} ({first[2]})")
+            print(f"[Client {self.client_id}]   Last:  {last[0]} -> {last[1]} ({last[2]})")
         
-        print(f"[Client {self.client_id}] Decoder parameters: {len(decoder_params)}")
-        if decoder_params:
-            print(f"[Client {self.client_id}]   First: {decoder_params[0][0]} -> {decoder_params[0][1]}")
-            print(f"[Client {self.client_id}]   Last:  {decoder_params[-1][0]} -> {decoder_params[-1][1]}")
+        print(f"[Client {self.client_id}] Decoder backbone parameters: {len(decoder_backbone_params)}")
+        if decoder_backbone_params:
+            first = decoder_backbone_params[0]
+            last = decoder_backbone_params[-1]
+            print(f"[Client {self.client_id}]   First: {first[0]} -> {first[1]} ({first[2]})")
+            print(f"[Client {self.client_id}]   Last:  {last[0]} -> {last[1]} ({last[2]})")
         
-        print(f"[Client {self.client_id}] Transpconv parameters: {len(transpconv_params)}")
-        for param_name, shape_str in transpconv_params:
-            print(f"[Client {self.client_id}]   {param_name} -> {shape_str}")
+        print(f"[Client {self.client_id}] Transpose convolution parameters: {len(transpconv_params)}")
+        for param_name, shape_str, exc_type in transpconv_params:
+            print(f"[Client {self.client_id}]   {param_name} -> {shape_str} ({exc_type})")
         
         print(f"[Client {self.client_id}] Segmentation layer parameters: {len(seg_layer_params)}")
-        for param_name, shape_str in seg_layer_params:
-            print(f"[Client {self.client_id}]   {param_name} -> {shape_str}")
+        for param_name, shape_str, exc_type in seg_layer_params:
+            print(f"[Client {self.client_id}]   {param_name} -> {shape_str} ({exc_type})")
         
         if other_params:
             print(f"[Client {self.client_id}] Other parameters: {len(other_params)}")
-            for param_name, shape_str in other_params[:3]:  # Show first 3
-                print(f"[Client {self.client_id}]   {param_name} -> {shape_str}")
+            for param_name, shape_str, exc_type in other_params[:3]:  # Show first 3
+                print(f"[Client {self.client_id}]   {param_name} -> {shape_str} ({exc_type})")
         
-        print(f"[Client {self.client_id}] =======================================\n")
+        print(f"[Client {self.client_id}] ============================================\n")
 
-    def _load_backbone_parameters(self, backbone_parameters: dict):
-        """Load backbone parameters while preserving first and last layer weights."""
+    def _load_backbone_parameters(self, backbone_parameters: list, param_names: list = None):
+        """Load backbone parameters from server with enhanced compatibility for heterogeneous architectures.
+        
+        Args:
+            backbone_parameters: List of parameter tensors from server aggregation
+            param_names: List of parameter names corresponding to the tensors
+        
+        Uses strict=False loading to handle architecture differences gracefully.
+        """
         try:
             current_weights = self.trainer.get_weights()
             updated_weights = current_weights.copy()
             
-            # Update only backbone parameters, keeping first/last layers unchanged
+            # Use stored param_names if not provided
+            if param_names is None:
+                param_names = getattr(self, 'param_names', [])
+            
+            if len(backbone_parameters) != len(param_names):
+                print(f"[Client {self.client_id}] Parameter count mismatch: {len(backbone_parameters)} values vs {len(param_names)} names")
+                return
+            
+            print(f"[Client {self.client_id}] Loading {len(backbone_parameters)} backbone parameters from server")
+            
             loaded_count = 0
-            for param_name, param_value in backbone_parameters.items():
+            skipped_count = 0
+            shape_mismatch_count = 0
+            
+            for param_name, param_value in zip(param_names, backbone_parameters):
                 if param_name in current_weights:
                     if hasattr(param_value, 'shape') and hasattr(current_weights[param_name], 'shape'):
                         if param_value.shape == current_weights[param_name].shape:
                             updated_weights[param_name] = param_value
                             loaded_count += 1
                         else:
-                            print(f"[Client {self.client_id}] Shape mismatch for {param_name}: {param_value.shape} vs {current_weights[param_name].shape}")
+                            print(f"[Client {self.client_id}] Shape mismatch for {param_name}: server {param_value.shape} vs local {current_weights[param_name].shape}")
+                            shape_mismatch_count += 1
                     else:
                         updated_weights[param_name] = param_value
                         loaded_count += 1
+                else:
+                    print(f"[Client {self.client_id}] Parameter {param_name} not found in local model, skipping")
+                    skipped_count += 1
             
-            self.trainer.set_weights(updated_weights)
-            print(f"[Client {self.client_id}] Loaded {loaded_count} backbone parameters")
+            # Load parameters with enhanced error handling
+            try:
+                self.trainer.set_weights(updated_weights)
+                print(f"[Client {self.client_id}] Successfully loaded parameters into model with strict=False")
+            except Exception as set_weights_error:
+                print(f"[Client {self.client_id}] Warning: Error in set_weights: {set_weights_error}")
+                print(f"[Client {self.client_id}] This may be due to remaining architecture mismatches")
+                print(f"[Client {self.client_id}] Continuing with current local parameters")
+                return
+            
+            print(f"[Client {self.client_id}] ===== PARAMETER LOADING SUMMARY =====")
+            print(f"[Client {self.client_id}]   Successfully loaded: {loaded_count} parameters")
+            print(f"[Client {self.client_id}]   Skipped (not found locally): {skipped_count} parameters")
+            print(f"[Client {self.client_id}]   Skipped (shape mismatch): {shape_mismatch_count} parameters")
+            print(f"[Client {self.client_id}]   Total parameters attempted: {len(backbone_parameters)}")
+            
+            if loaded_count == 0:
+                print(f"[Client {self.client_id}] WARNING: No parameters were loaded! Check parameter compatibility.")
+            elif shape_mismatch_count > 0 or skipped_count > 0:
+                print(f"[Client {self.client_id}] INFO: Some parameters skipped - this is normal for heterogeneous architectures")
             
         except Exception as e:
-            print(f"[Client {self.client_id}] Error loading backbone parameters: {e}")
-            print(f"[Client {self.client_id}] Keeping current parameters as fallback")
+            print(f"[Client {self.client_id}] ERROR: Exception during backbone parameter loading: {e}")
+            print(f"[Client {self.client_id}] Keeping current local parameters as fallback")
+            import traceback
+            print(f"[Client {self.client_id}] Traceback: {traceback.format_exc()}")
 
     
     
@@ -453,8 +871,9 @@ class NnUNet3DFullresClient(NumPyClient):
 
     def get_parameters(self, config) -> NDArrays:
         """
-        Return current model parameters as a list of numpy arrays.
-        For new strategy: only return backbone layers (exclude first/last layers).
+        Return current model parameters as a simple list of numpy arrays (Flower-compatible).
+        For federated nnUNet: only return common backbone layers.
+        Raw parameter names and metadata will be passed through fit() metrics.
         """
         if not self.trainer.was_initialized:
             self.trainer.initialize()
@@ -462,14 +881,46 @@ class NnUNet3DFullresClient(NumPyClient):
         weights_dict = self.trainer.get_weights()
         
         # Log detailed parameter structure for debugging
-        self._log_parameter_structure(weights_dict, "get_parameters")
+        self._log_parameter_structure(weights_dict, "filter_common_backbone_parameters")
         
-        # Filter to backbone parameters only (exclude first and last layers)
-        backbone_weights_dict = self._filter_backbone_parameters(weights_dict)
+        # Filter to common backbone parameters (using raw parameter names)
+        backbone_dict = self._filter_common_backbone_parameters(weights_dict)
         
-        self.param_keys = list(backbone_weights_dict.keys())
-        print(f"[Client {self.client_id}] Sending {len(self.param_keys)} backbone parameters (excluded first/last layers)")
-        return list(backbone_weights_dict.values())
+        if not backbone_dict:
+            print(f"[Client {self.client_id}] WARNING: No common backbone parameters found after strict filtering!")
+            print(f"[Client {self.client_id}] Applying minimum parameter guarantee...")
+            
+            # MINIMUM PARAMETER GUARANTEE: Include at least some middle layers
+            fallback_backbone_dict = {}
+            
+            # Try to include ONLY middle encoder layers as fallback (NO first/last layers)
+            for param_name, param_tensor in weights_dict.items():
+                if (any(stage in param_name for stage in ["stages.1", "stages.2", "stages.3"]) and
+                    "conv" in param_name.lower() and
+                    "stages.0" not in param_name and  # Explicitly exclude first stage
+                    "stages.4" not in param_name and  # Explicitly exclude potential last stage
+                    not self._is_input_layer(param_name) and
+                    not self._is_output_layer(param_name)):
+                    fallback_backbone_dict[param_name] = param_tensor
+            
+            if fallback_backbone_dict:
+                print(f"[Client {self.client_id}] Found {len(fallback_backbone_dict)} fallback backbone parameters")
+                backbone_dict = fallback_backbone_dict
+            else:
+                print(f"[Client {self.client_id}] CRITICAL: No parameters can be safely shared! Using empty set.")
+                self.param_names = []
+                return []
+        
+        # Store parameter names in sorted order for consistency across clients
+        self.param_names = sorted(backbone_dict.keys())
+        
+        # Return parameters in consistent sorted order (Flower-compatible NDArrays)
+        param_values = [backbone_dict[name] for name in self.param_names]
+        
+        print(f"[Client {self.client_id}] Sending {len(self.param_names)} common backbone parameters")
+        print(f"[Client {self.client_id}] Parameter names preview: {self.param_names[:3]}..." if len(self.param_names) > 3 else f"[Client {self.client_id}] Parameter names: {self.param_names}")
+        
+        return param_values
 
     def _warmup_first_last_layers(self, warmup_epochs: int):
         """
@@ -485,6 +936,7 @@ class NnUNet3DFullresClient(NumPyClient):
         self.is_warmed_up = True
         print(f"[Client {self.client_id}] Warmup complete - first/last layers trained for {warmup_epochs} epochs")
 
+
     def fit(self, parameters: NDArrays, config):
         """
         Receive global backbone params, do local training, return updated params + metrics.
@@ -498,13 +950,13 @@ class NnUNet3DFullresClient(NumPyClient):
             if not self.trainer.was_initialized:
                 self.trainer.initialize()
             
-            # Get initial backbone parameters for consistency
-            if self.param_keys is None:
-                local_sd = self.trainer.get_weights()
-                backbone_sd = self._filter_backbone_parameters(local_sd)
-                self.param_keys = list(backbone_sd.keys())
-                
-            initial_params = [backbone_sd[k] for k in self.param_keys]
+            # Get initial common backbone parameters (simple format)
+            initial_weights = self.trainer.get_weights()
+            backbone_dict = self._filter_common_backbone_parameters(initial_weights)
+            self.param_names = sorted(backbone_dict.keys())  # Store sorted parameter names
+            
+            # Return parameters in simple list format
+            initial_params = [backbone_dict[name] for name in self.param_names]
             
             # Create a simple fingerprint summary for metrics
             fp_summary = {}
@@ -534,7 +986,13 @@ class NnUNet3DFullresClient(NumPyClient):
                 "fingerprint_cases": fp_summary.get("num_cases", 0),
                 "fingerprint_mean": fp_summary.get("mean_intensity", 0.0),
                 "actual_training_cases": actual_training_cases,
-                "is_warmup": False
+                "is_warmup": False,
+                # Parameter metadata for common layer aggregation
+                "param_names_str": json.dumps(self.param_names),
+                "param_shapes_str": json.dumps([list(initial_params[i].shape) for i in range(len(initial_params))]) if initial_params else "[]",
+                "num_params": len(initial_params),
+                # Architecture compatibility signature
+                "architecture_signature": self._get_architecture_signature()
             }
             # Add modality and architecture information to metrics
             metrics.update(modality_info)
@@ -548,23 +1006,30 @@ class NnUNet3DFullresClient(NumPyClient):
             if not self.trainer.was_initialized:
                 self.trainer.initialize()
                 
-            if self.param_keys is None:
+            # Initialize param_names if needed
+            if not hasattr(self, 'param_names') or not self.param_names:
                 local_sd = self.trainer.get_weights()
-                backbone_sd = self._filter_backbone_parameters(local_sd)
-                self.param_keys = list(backbone_sd.keys())
+                backbone_dict = self._filter_common_backbone_parameters(local_sd)
+                self.param_names = sorted(backbone_dict.keys())
                 
-            # Apply received global backbone parameters
+            # Apply received global backbone parameters (simple list format)
             if parameters:
-                backbone_params = {}
-                for k, arr in zip(self.param_keys, parameters):
-                    backbone_params[k] = arr
+                # Load backbone parameters while preserving architecture-specific layers
+                self._load_backbone_parameters(parameters)
                 
-                # Load backbone parameters while preserving first/last layers
-                self._load_backbone_parameters(backbone_params)
-                
+            # Return updated parameters in simple format
             updated_dict = self.trainer.get_weights()
-            backbone_dict = self._filter_backbone_parameters(updated_dict)
-            updated_params = [backbone_dict[k] for k in self.param_keys]
+            backbone_dict = self._filter_common_backbone_parameters(updated_dict)
+            
+            # Return parameters in consistent sorted order
+            updated_params = [backbone_dict[name] for name in self.param_names if name in backbone_dict]
+            
+            # SAFETY CHECK: Ensure non-empty parameter list
+            if not updated_params:
+                print(f"[Client {self.client_id}] ERROR: Initialization resulted in empty parameter list!")
+                print(f"[Client {self.client_id}] param_names: {self.param_names}")
+                print(f"[Client {self.client_id}] backbone_dict keys: {list(backbone_dict.keys())}")
+                raise RuntimeError("Empty parameter list would cause ClientAppOutputs error")
             
             # Get actual training count for initialization phase too
             actual_training_cases = self._get_actual_training_count()
@@ -574,20 +1039,33 @@ class NnUNet3DFullresClient(NumPyClient):
                 "loss": 0.0,
                 "initialization_complete": True,
                 "actual_training_cases": actual_training_cases,
-                "is_warmup": False
+                "is_warmup": False,
+                # Parameter metadata for common layer aggregation
+                "param_names_str": json.dumps(self.param_names),
+                "param_shapes_str": json.dumps([list(updated_params[i].shape) for i in range(len(updated_params))]) if updated_params else "[]",
+                "num_params": len(updated_params),
+                # Architecture compatibility signature
+                "architecture_signature": self._get_architecture_signature()
             }
             return updated_params, actual_training_cases, metrics
 
         # Regular training rounds (federated_round >= 0)
         print(f"[Client {self.client_id}] Training round {federated_round}")
         
+        # Log round start to wandb
+        if self.wandb_logger.enabled:
+            self.wandb_logger.log_metrics({
+                "federated/round": federated_round,
+                "federated/round_start": True
+            }, step=federated_round)
+        
         # Check if this is round 0 (warmup round)
         is_warmup_round = (federated_round == 0)
         
-        if self.param_keys is None:
+        if not hasattr(self, 'param_names') or not self.param_names:
             local_sd = self.trainer.get_weights()
-            backbone_sd = self._filter_backbone_parameters(local_sd)
-            self.param_keys = list(backbone_sd.keys())
+            backbone_dict = self._filter_common_backbone_parameters(local_sd)
+            self.param_names = sorted(backbone_dict.keys())
 
         # Handle warmup logic for round 0
         if is_warmup_round and not self.is_warmed_up:
@@ -596,10 +1074,19 @@ class NnUNet3DFullresClient(NumPyClient):
             self._warmup_first_last_layers(self.warmup_epochs)
             
             # No parameter loading from server in warmup round
-            # Just return current backbone parameters after warmup
+            # Just return current backbone parameters after warmup (simple format)
             updated_dict = self.trainer.get_weights()
-            backbone_dict = self._filter_backbone_parameters(updated_dict)
-            updated_params = [backbone_dict[k] for k in self.param_keys]
+            backbone_dict = self._filter_common_backbone_parameters(updated_dict)
+            
+            # Return parameters in consistent sorted order
+            updated_params = [backbone_dict[name] for name in self.param_names if name in backbone_dict]
+            
+            # SAFETY CHECK: Ensure non-empty parameter list
+            if not updated_params:
+                print(f"[Client {self.client_id}] ERROR: Warmup resulted in empty parameter list!")
+                print(f"[Client {self.client_id}] param_names: {self.param_names}")
+                print(f"[Client {self.client_id}] backbone_dict keys: {list(backbone_dict.keys())}")
+                raise RuntimeError("Empty parameter list would cause ClientAppOutputs error")
             
             # Get actual number of training cases
             actual_training_cases = self._get_actual_training_count()
@@ -616,29 +1103,50 @@ class NnUNet3DFullresClient(NumPyClient):
                 "local_epochs_completed": self.warmup_epochs,
                 "actual_training_cases": actual_training_cases,
                 "is_warmup": True,
-                "warmup_complete": True
+                "warmup_complete": True,
+                # Parameter metadata for common layer aggregation
+                "param_names_str": json.dumps(self.param_names),
+                "param_shapes_str": json.dumps([list(updated_params[i].shape) for i in range(len(updated_params))]) if updated_params else "[]",
+                "num_params": len(updated_params),
+                # Architecture compatibility signature
+                "architecture_signature": self._get_architecture_signature()
             }
+            
+            # Log warmup completion to wandb
+            if self.wandb_logger.enabled:
+                warmup_metrics = {
+                    "federated/warmup_loss": final_loss,
+                    "federated/warmup_epochs": self.warmup_epochs,
+                    "federated/warmup_complete": True,
+                    "federated/training_cases": actual_training_cases
+                }
+                self.wandb_logger.log_metrics(warmup_metrics, step=federated_round)
             
             return updated_params, actual_training_cases, metrics
         
         # Regular training rounds (federated_round > 0)
-        # Load backbone parameters from server
+        # Load backbone parameters from server (simple list format)
         if parameters:
-            backbone_params = {}
-            for k, arr in zip(self.param_keys, parameters):
-                backbone_params[k] = arr
-            
-            # Load backbone parameters while preserving first/last layers
-            self._load_backbone_parameters(backbone_params)
+            # Load backbone parameters while preserving architecture-specific layers
+            self._load_backbone_parameters(parameters)
 
         # Local training
         local_epochs = config.get("local_epochs", 1)
         self.trainer.run_training_round(local_epochs)
 
-        # Return updated backbone parameters only
+        # Return updated backbone parameters only (simple format)
         updated_dict = self.trainer.get_weights()
-        backbone_dict = self._filter_backbone_parameters(updated_dict)
-        updated_params = [backbone_dict[k] for k in self.param_keys]
+        backbone_dict = self._filter_common_backbone_parameters(updated_dict)
+        
+        # Return parameters in consistent sorted order
+        updated_params = [backbone_dict[name] for name in self.param_names if name in backbone_dict]
+        
+        # SAFETY CHECK: Ensure non-empty parameter list
+        if not updated_params:
+            print(f"[Client {self.client_id}] ERROR: Training resulted in empty parameter list!")
+            print(f"[Client {self.client_id}] param_names: {self.param_names}")
+            print(f"[Client {self.client_id}] backbone_dict keys: {list(backbone_dict.keys())}")
+            raise RuntimeError("Empty parameter list would cause ClientAppOutputs error")
 
         # Get actual number of training cases from the trainer's split
         actual_training_cases = self._get_actual_training_count()
@@ -655,8 +1163,24 @@ class NnUNet3DFullresClient(NumPyClient):
             "federated_round": federated_round,
             "local_epochs_completed": local_epochs,
             "actual_training_cases": actual_training_cases,
-            "is_warmup": False
+            "is_warmup": False,
+            # Parameter metadata for common layer aggregation
+            "param_names_str": json.dumps(self.param_names),
+            "param_shapes_str": json.dumps([list(updated_params[i].shape) for i in range(len(updated_params))]) if updated_params else "[]",
+            "num_params": len(updated_params),
+            # Architecture compatibility signature
+            "architecture_signature": self._get_architecture_signature()
         }
+        
+        # Log training completion to wandb
+        if self.wandb_logger.enabled:
+            training_metrics = {
+                "federated/training_loss": final_loss,
+                "federated/local_epochs": local_epochs,
+                "federated/training_cases": actual_training_cases,
+                "federated/round_complete": True
+            }
+            self.wandb_logger.log_metrics(training_metrics, step=federated_round)
         
         # Add modality information to training metrics if requested
         if config.get("enable_modality_metadata", False):
@@ -683,6 +1207,19 @@ class NnUNet3DFullresClient(NumPyClient):
                 
                 print(f"[Client {self.client_id}] Validation Dice: {current_dice:.4f}")
                 
+                # Log validation results to wandb
+                if self.wandb_logger.enabled:
+                    val_metrics = {
+                        "federated/validation_dice_mean": current_dice,
+                        "federated/validation_num_batches": validation_results.get('num_batches', 0)
+                    }
+                    # Log per-class dice scores
+                    for label, score in per_label_scores.items():
+                        if isinstance(score, (int, float)) and not np.isnan(score):
+                            val_metrics[f"federated/validation_dice_class_{label}"] = float(score)
+                    
+                    self.wandb_logger.log_metrics(val_metrics, step=federated_round)
+                
                 # Save PyTorch model if validation improved and output directory is set
                 if hasattr(self, 'client_output_dir') and self.client_output_dir:
                     is_best = current_dice > self.best_validation_dice
@@ -704,6 +1241,35 @@ class NnUNet3DFullresClient(NumPyClient):
                                 metrics["pytorch_checkpoint_saved"] = checkpoint_path
                                 metrics["best_model_updated"] = True
                                 print(f"[Client {self.client_id}] Saved best model checkpoint: {checkpoint_path}")
+                                
+                                # Log model artifact to wandb
+                                if self.wandb_logger.enabled:
+                                    try:
+                                        artifact_name = f"client_{self.client_id}_best_model_round_{federated_round}"
+                                        artifact_metadata = {
+                                            "client_id": self.client_id,
+                                            "federated_round": federated_round,
+                                            "validation_dice": current_dice,
+                                            "is_best": True,
+                                            "dataset_name": self.dataset_name,
+                                            "modality": self.modality
+                                        }
+                                        self.wandb_logger.log_model_artifact(
+                                            model_path=checkpoint_path,
+                                            artifact_name=artifact_name,
+                                            artifact_type="federated_model",
+                                            metadata=artifact_metadata
+                                        )
+                                        
+                                        # Log checkpoint metrics
+                                        checkpoint_metrics = {
+                                            "federated/best_model_updated": True,
+                                            "federated/best_validation_dice": current_dice,
+                                            "federated/checkpoint_round": federated_round
+                                        }
+                                        self.wandb_logger.log_metrics(checkpoint_metrics, step=federated_round)
+                                    except Exception as artifact_error:
+                                        print(f"[Client {self.client_id}] Failed to log model artifact to wandb: {artifact_error}")
                         except Exception as save_e:
                             print(f"[Client {self.client_id}] Failed to save PyTorch checkpoint: {save_e}")
                     else:

@@ -172,8 +172,34 @@ class ModalityAwareFederatedStrategy(FedAvg):
         if not modality_params_and_weights:
             return None, {}
         
-        # Perform weighted averaging within modality
-        aggregated_params = self._weighted_average(modality_params_and_weights)
+        # Use asymmetric aggregation for modality-level aggregation
+        if len(modality_params_and_weights) > 1:
+            # Extract client results for this modality
+            modality_client_results = [(client_proxy, fit_res) for client_proxy, fit_res in client_results 
+                                     if self.client_modalities.get(str(fit_res.metrics.get("client_id", "unknown"))) == modality]
+            
+            if len(modality_client_results) > 1:
+                # Use simple common layer aggregation following FednnUNet approach
+                client_info = self._extract_client_parameter_info(modality_client_results)
+                compatible_params = self._find_common_layers(client_info)
+                
+                if compatible_params and len(compatible_params) > 0:
+                    print(f"[Server] Modality {modality}: aggregating {len(compatible_params)} common parameters")
+                    aggregated_param_dict = self._asymmetric_weighted_average(client_info, compatible_params)
+                    # Convert back to list format using first client's parameter order
+                    first_client_id = list(client_info.keys())[0]
+                    first_client_names = client_info[first_client_id]["param_names"]
+                    aggregated_params = [aggregated_param_dict.get(name, client_info[first_client_id]["parameters"][i]) 
+                                       for i, name in enumerate(first_client_names)]
+                else:
+                    # No common parameters - use intelligent fallback
+                    print(f"[Server] Modality {modality}: no common parameters found, using fallback")
+                    aggregated_params, fallback_summary = self._intelligent_fallback_aggregation(client_info, {})
+                    print(f"[Server] Modality {modality} fallback: {fallback_summary.get('aggregation_method', 'unknown')}")
+            else:
+                aggregated_params = self._weighted_average(modality_params_and_weights)
+        else:
+            aggregated_params = self._weighted_average(modality_params_and_weights)
         
         # Calculate modality-specific metrics
         modality_validation_scores = []
@@ -222,8 +248,34 @@ class ModalityAwareFederatedStrategy(FedAvg):
         if not group_params_and_weights:
             return None, {}
         
-        # Perform weighted averaging within dataset-modality group
-        aggregated_params = self._weighted_average(group_params_and_weights)
+        # Use asymmetric aggregation if we have the client results 
+        if len(group_params_and_weights) > 1:
+            # Extract client info for asymmetric aggregation
+            group_client_results = [(client_proxy, fit_res) for client_proxy, fit_res in client_results 
+                                   if self.client_signatures.get(str(fit_res.metrics.get("client_id", "unknown")), "UNKNOWN_UNKNOWN") == signature]
+            
+            if len(group_client_results) > 1:
+                # Use simple common layer aggregation for dataset-modality groups
+                client_info = self._extract_client_parameter_info(group_client_results)
+                compatible_params = self._find_common_layers(client_info)
+                
+                if compatible_params and len(compatible_params) > 0:
+                    print(f"[Server] Dataset-modality {signature}: aggregating {len(compatible_params)} common parameters")
+                    aggregated_param_dict = self._asymmetric_weighted_average(client_info, compatible_params)
+                    # Convert back to list format using first client's parameter order
+                    first_client_id = list(client_info.keys())[0]
+                    first_client_names = client_info[first_client_id]["param_names"]
+                    aggregated_params = [aggregated_param_dict.get(name, client_info[first_client_id]["parameters"][i]) 
+                                       for i, name in enumerate(first_client_names)]
+                else:
+                    # No common parameters - use intelligent fallback
+                    print(f"[Server] Dataset-modality {signature}: no common parameters found, using fallback")
+                    aggregated_params, fallback_summary = self._intelligent_fallback_aggregation(client_info, {})
+                    print(f"[Server] Dataset-modality {signature} fallback: {fallback_summary.get('aggregation_method', 'unknown')}")
+            else:
+                aggregated_params = self._weighted_average(group_params_and_weights)
+        else:
+            aggregated_params = self._weighted_average(group_params_and_weights)
         
         # Calculate group-specific metrics
         group_validation_scores = []
@@ -397,6 +449,529 @@ class ModalityAwareFederatedStrategy(FedAvg):
         
         return global_params, global_summary
 
+    def _extract_client_parameter_info(self, results: List[Tuple[ClientProxy, FitRes]]) -> Dict:
+        """
+        Extract parameter metadata from client metrics following FednnUNet approach.
+        Returns: {client_id: {"param_names": [], "param_shapes": [], "parameters": [], "weight": float, "architecture_signature": str}}
+        """
+        client_info = {}
+        
+        for client_proxy, fit_res in results:
+            client_id = str(fit_res.metrics.get("client_id", "unknown"))
+            
+            # Extract parameter metadata from client metrics
+            param_names_str = fit_res.metrics.get("param_names_str", "[]")
+            try:
+                param_names = json.loads(param_names_str) if param_names_str else []
+            except json.JSONDecodeError:
+                param_names = fit_res.metrics.get("param_names", [])  # Fallback
+            param_shapes_str = fit_res.metrics.get("param_shapes_str", "[]")
+            try:
+                param_shapes = json.loads(param_shapes_str) if param_shapes_str else []
+            except json.JSONDecodeError:
+                param_shapes = fit_res.metrics.get("param_shapes", [])  # Fallback
+            num_params = fit_res.metrics.get("num_params", 0)
+            architecture_signature = fit_res.metrics.get("architecture_signature", "unknown")
+            
+            # Convert Flower parameters to NDArrays
+            parameters = parameters_to_ndarrays(fit_res.parameters)
+            
+            # Basic validation
+            if len(parameters) != len(param_names):
+                print(f"[Server] Client {client_id}: parameter count mismatch - {len(parameters)} parameters vs {len(param_names)} names")
+                continue
+                
+            if len(parameters) != len(param_shapes):
+                print(f"[Server] Client {client_id}: shape count mismatch - {len(parameters)} parameters vs {len(param_shapes)} shapes")
+                continue
+            
+            client_info[client_id] = {
+                "param_names": param_names,
+                "param_shapes": param_shapes,
+                "parameters": parameters,
+                "weight": float(fit_res.num_examples),  # Use number of examples as weight
+                "num_examples": fit_res.num_examples,
+                "architecture_signature": architecture_signature,
+                "metrics": fit_res.metrics
+            }
+            
+            print(f"[Server] Client {client_id}: extracted {len(param_names)} parameter names (arch: {architecture_signature})")
+        
+        print(f"[Server] Successfully extracted parameter info from {len(client_info)} clients")
+        return client_info
+
+    def _find_common_layers(self, client_info: Dict) -> Dict:
+        """
+        Enhanced parameter intersection with strict (name, shape) matching.
+        Only aggregates parameters present in ALL clients with IDENTICAL shapes.
+        Returns: {param_name: {"shape": shape, "clients": [client_ids], "client_count": int, "is_batchnorm_learnable": bool}}
+        """
+        if not client_info:
+            return {}
+        
+        print(f"[Server] Finding common parameters across {len(client_info)} clients using enhanced intersection")
+        
+        # Log detailed client information
+        total_client_params = 0
+        for client_id, info in client_info.items():
+            arch_sig = info.get("architecture_signature", "unknown")
+            num_params = len(info["param_names"])
+            weight = info.get("weight", "unknown")
+            total_client_params += num_params
+            print(f"[Server] Client {client_id}: {num_params} parameters, weight: {weight}, architecture: {arch_sig}")
+        
+        print(f"[Server] Total parameters across all clients: {total_client_params}")
+        
+        # Create (name, shape) tuples for intersection
+        client_ids = list(client_info.keys())
+        if not client_ids:
+            return {}
+        
+        # Build parameter signature sets for each client: {(name, shape_tuple): client_id}
+        client_param_signatures = {}
+        for client_id, info in client_info.items():
+            signatures = set()
+            for i, param_name in enumerate(info["param_names"]):
+                param_shape = tuple(info["param_shapes"][i])  # Ensure tuple for hashing
+                signatures.add((param_name, param_shape))
+            client_param_signatures[client_id] = signatures
+            print(f"[Server] Client {client_id}: {len(signatures)} unique (name, shape) signatures")
+        
+        # Find intersection of (name, shape) signatures across ALL clients
+        common_signatures = client_param_signatures[client_ids[0]]
+        for client_id in client_ids[1:]:
+            common_signatures = common_signatures.intersection(client_param_signatures[client_id])
+        
+        print(f"[Server] Found {len(common_signatures)} common (name, shape) signatures across all clients")
+        
+        # Build compatible parameters dictionary
+        compatible_params = {}
+        batchnorm_learnable_count = 0
+        batchnorm_running_count = 0
+        
+        for param_name, param_shape in common_signatures:
+            # Determine if this is a BatchNorm learnable parameter
+            is_batchnorm_learnable = self._is_batchnorm_learnable_param(param_name)
+            is_batchnorm_running = self._is_batchnorm_running_stat(param_name)
+            
+            if is_batchnorm_learnable:
+                batchnorm_learnable_count += 1
+            elif is_batchnorm_running:
+                batchnorm_running_count += 1
+                # Skip BatchNorm running statistics by default
+                print(f"[Server] Excluding BatchNorm running stat: {param_name} (shape: {param_shape})")
+                continue
+            
+            compatible_params[param_name] = {
+                "shape": param_shape,
+                "clients": client_ids.copy(),  # All clients have this parameter
+                "client_count": len(client_ids),
+                "is_batchnorm_learnable": is_batchnorm_learnable
+            }
+        
+        # Log detailed statistics
+        print(f"[Server] ===== PARAMETER INTERSECTION SUMMARY =====")
+        print(f"[Server] Total compatible parameters: {len(compatible_params)}")
+        print(f"[Server] BatchNorm learnable parameters: {batchnorm_learnable_count}")
+        print(f"[Server] BatchNorm running stats excluded: {batchnorm_running_count}")
+        print(f"[Server] Regular backbone parameters: {len(compatible_params) - batchnorm_learnable_count}")
+        
+        # Log sample parameters for verification
+        sample_params = list(compatible_params.keys())[:5]
+        print(f"[Server] Sample compatible parameters:")
+        for param_name in sample_params:
+            shape = compatible_params[param_name]["shape"]
+            is_bn = compatible_params[param_name]["is_batchnorm_learnable"]
+            bn_flag = " (BatchNorm)" if is_bn else ""
+            print(f"[Server]   {param_name} -> {shape}{bn_flag}")
+        
+        if len(compatible_params) == 0:
+            print(f"[Server] WARNING: No compatible parameters found for aggregation!")
+            print(f"[Server] This may indicate architecture incompatibility between clients.")
+        
+        return compatible_params
+
+    def _is_batchnorm_learnable_param(self, param_name: str) -> bool:
+        """
+        Check if a parameter is a BatchNorm learnable parameter (weight or bias).
+        Returns True for gamma (weight) and beta (bias) parameters.
+        """
+        # Remove wrapper prefixes
+        clean_name = param_name.replace("_orig_mod.", "").replace("network.", "").replace("model.", "")
+        
+        # Check for norm layer indicators and learnable parameter types
+        norm_indicators = [".norm.", ".bn.", ".batch_norm.", "_norm.", "_bn."]
+        learnable_types = [".weight", ".bias"]
+        
+        has_norm = any(indicator in clean_name for indicator in norm_indicators)
+        has_learnable = any(param_type in clean_name for param_type in learnable_types)
+        
+        return has_norm and has_learnable
+    
+    def _is_batchnorm_running_stat(self, param_name: str) -> bool:
+        """
+        Check if a parameter is a BatchNorm running statistic.
+        Returns True for running_mean, running_var, num_batches_tracked.
+        """
+        # Remove wrapper prefixes
+        clean_name = param_name.replace("_orig_mod.", "").replace("network.", "").replace("model.", "")
+        
+        # Check for running statistics
+        running_stats = ["running_mean", "running_var", "num_batches_tracked"]
+        norm_indicators = [".norm.", ".bn.", ".batch_norm.", "_norm.", "_bn."]
+        
+        has_norm = any(indicator in clean_name for indicator in norm_indicators)
+        has_running_stat = any(stat in clean_name for stat in running_stats)
+        
+        return has_norm and has_running_stat
+
+    def _find_common_semantic_parameters(self, client_info: Dict) -> Dict:
+        """
+        Find semantic parameters that exist in multiple clients with identical shapes.
+        Enhanced implementation for semantic parameter matching across heterogeneous architectures.
+        Returns: {semantic_param_name: {"shape": shape, "clients": [client_ids], "client_count": int, "architecture_signatures": [sigs]}}
+        """
+        if not client_info:
+            return {}
+        
+        print(f"[Server] Finding common semantic parameters across {len(client_info)} clients")
+        
+        # Log client architecture signatures
+        architectures = {}
+        for client_id, info in client_info.items():
+            arch_sig = info.get("architecture_signature", "unknown")
+            if arch_sig not in architectures:
+                architectures[arch_sig] = []
+            architectures[arch_sig].append(client_id)
+            
+        print(f"[Server] Client architectures found: {dict(architectures)}")
+        
+        # Collect all unique semantic parameter names across clients
+        all_semantic_names = set()
+        for info in client_info.values():
+            all_semantic_names.update(info["semantic_param_names"])
+        
+        compatible_params = {}
+        
+        # Check each semantic parameter for compatibility across clients
+        for semantic_name in all_semantic_names:
+            clients_with_param = []
+            param_shapes = []
+            client_architectures = []
+            
+            # Find which clients have this semantic parameter and their shapes
+            for client_id, info in client_info.items():
+                if semantic_name in info["semantic_param_names"]:
+                    param_idx = info["semantic_param_names"].index(semantic_name)
+                    param_shape = info["param_shapes"][param_idx]
+                    
+                    clients_with_param.append(client_id)
+                    param_shapes.append(param_shape)
+                    client_architectures.append(info.get("architecture_signature", "unknown"))
+            
+            # Only include if multiple clients have it with identical shapes
+            if len(clients_with_param) > 1:
+                # Check if all shapes are identical
+                if all(tuple(shape) == tuple(param_shapes[0]) for shape in param_shapes):
+                    compatible_params[semantic_name] = {
+                        "shape": tuple(param_shapes[0]),
+                        "clients": clients_with_param,
+                        "client_count": len(clients_with_param),
+                        "architecture_signatures": client_architectures
+                    }
+                    print(f"[Server] Common semantic parameter: {semantic_name} -> {param_shapes[0]} (clients: {clients_with_param})")
+                else:
+                    print(f"[Server] Shape mismatch for semantic parameter {semantic_name}: {param_shapes} (clients: {clients_with_param})")
+            else:
+                print(f"[Server] Semantic parameter {semantic_name} only exists in {len(clients_with_param)} client(s), skipping")
+        
+        print(f"[Server] Found {len(compatible_params)} common semantic parameters out of {len(all_semantic_names)} total unique semantic parameters")
+        
+        # Enhanced compatibility analysis
+        total_possible_pairs = len(client_info) * (len(client_info) - 1) // 2
+        if len(compatible_params) < len(all_semantic_names) * 0.3:
+            print(f"[Server] LOW COMPATIBILITY: Only {len(compatible_params)}/{len(all_semantic_names)} semantic parameters are common")
+            print(f"[Server] This suggests very heterogeneous architectures - expect limited aggregation effectiveness")
+        elif len(compatible_params) < len(all_semantic_names) * 0.7:
+            print(f"[Server] MODERATE COMPATIBILITY: {len(compatible_params)}/{len(all_semantic_names)} semantic parameters are common")
+            print(f"[Server] Reasonably compatible architectures - aggregation should be effective")
+        else:
+            print(f"[Server] HIGH COMPATIBILITY: {len(compatible_params)}/{len(all_semantic_names)} semantic parameters are common")
+            print(f"[Server] Very compatible architectures - optimal aggregation expected")
+        
+        return compatible_params
+
+    def _find_compatible_parameters(self, client_info: Dict) -> Dict:
+        """
+        Simple method for finding compatible parameters - uses intersection approach.
+        """
+        return self._find_common_layers(client_info)
+
+    def _semantic_weighted_average(self, client_info: Dict, compatible_params: Dict) -> Dict:
+        """
+        Enhanced asymmetric aggregation using semantic parameter names.
+        Only aggregates semantic parameters that exist in multiple clients with same shape.
+        Returns: {semantic_param_name: aggregated_parameter}
+        """
+        if not compatible_params:
+            print(f"[Server] No common semantic parameters found for aggregation")
+            return {}
+        
+        print(f"[Server] Performing semantic weighted average on {len(compatible_params)} common parameters")
+        
+        aggregated_params = {}
+        aggregation_stats = {
+            "total_aggregated": 0,
+            "total_skipped": 0,
+            "architecture_cross_aggregation": 0,
+            "same_architecture_aggregation": 0
+        }
+        
+        for semantic_name, compat_info in compatible_params.items():
+            # Collect parameter values and weights from compatible clients
+            param_values = []
+            weights = []
+            client_architectures = []
+            
+            for client_id in compat_info["clients"]:
+                client_data = client_info[client_id]
+                param_idx = client_data["semantic_param_names"].index(semantic_name)
+                param_value = client_data["parameters"][param_idx]
+                client_weight = client_data["weight"]
+                client_arch = client_data.get("architecture_signature", "unknown")
+                
+                param_values.append(param_value)
+                weights.append(client_weight)
+                client_architectures.append(client_arch)
+            
+            # Check if this is cross-architecture aggregation
+            unique_architectures = set(client_architectures)
+            if len(unique_architectures) > 1:
+                aggregation_stats["architecture_cross_aggregation"] += 1
+                print(f"[Server] Cross-architecture aggregation for {semantic_name}: {list(unique_architectures)}")
+            else:
+                aggregation_stats["same_architecture_aggregation"] += 1
+            
+            # Perform weighted average: enhanced version of θ^l = 1/|𝒦l| * ∑(k∈𝒦l) θlk
+            total_weight = sum(weights)
+            if total_weight == 0:
+                total_weight = len(weights)  # Equal weighting fallback
+            
+            # Weighted aggregation
+            aggregated_param = None
+            for param_value, weight in zip(param_values, weights):
+                contribution = (weight / total_weight) * param_value
+                if aggregated_param is None:
+                    aggregated_param = contribution
+                else:
+                    aggregated_param += contribution
+            
+            aggregated_params[semantic_name] = aggregated_param
+            aggregation_stats["total_aggregated"] += 1
+            
+            print(f"[Server] Aggregated semantic parameter {semantic_name} from {len(param_values)} clients (shape: {compat_info['shape']})")
+        
+        print(f"[Server] Semantic aggregation completed:")
+        print(f"[Server]   Aggregated parameters: {aggregation_stats['total_aggregated']}")
+        print(f"[Server]   Cross-architecture aggregations: {aggregation_stats['architecture_cross_aggregation']}")
+        print(f"[Server]   Same-architecture aggregations: {aggregation_stats['same_architecture_aggregation']}")
+        
+        return aggregated_params
+
+    def _asymmetric_weighted_average(self, client_info: Dict, compatible_params: Dict) -> Dict:
+        """
+        Enhanced weighted FedAvg aggregation with data size weighting.
+        Only aggregates parameters that exist in ALL clients with identical shapes.
+        Uses data-proportional weighting and proper weight validation.
+        Returns: {param_name: aggregated_parameter}
+        """
+        if not compatible_params:
+            print(f"[Server] No compatible parameters found for aggregation")
+            return {}
+        
+        print(f"[Server] Performing enhanced weighted FedAvg on {len(compatible_params)} compatible parameters")
+        
+        # Validate and normalize client weights
+        total_clients = len(client_info)
+        client_weights_info = {}
+        total_weight = 0
+        
+        for client_id, info in client_info.items():
+            weight = info.get("weight", 1.0)  # Default weight if missing
+            total_weight += weight
+            client_weights_info[client_id] = weight
+        
+        # Normalize weights to sum to 1.0
+        if total_weight > 0:
+            for client_id in client_weights_info:
+                client_weights_info[client_id] /= total_weight
+        else:
+            # Equal weighting fallback
+            equal_weight = 1.0 / total_clients
+            for client_id in client_weights_info:
+                client_weights_info[client_id] = equal_weight
+        
+        # Log weight distribution
+        print(f"[Server] ===== CLIENT WEIGHT DISTRIBUTION =====")
+        for client_id, normalized_weight in client_weights_info.items():
+            original_weight = client_info[client_id].get("weight", 1.0)
+            print(f"[Server] Client {client_id}: original_weight={original_weight:.2f}, normalized_weight={normalized_weight:.4f}")
+        
+        # Validate weights sum to 1.0
+        weight_sum = sum(client_weights_info.values())
+        assert abs(weight_sum - 1.0) < 1e-6, f"Weights do not sum to 1.0: {weight_sum}"
+        
+        aggregated_params = {}
+        batchnorm_aggregated = 0
+        regular_aggregated = 0
+        
+        for param_name, compat_info in compatible_params.items():
+            # Collect parameter values and normalized weights
+            param_values = []
+            normalized_weights = []
+            
+            for client_id in compat_info["clients"]:
+                client_data = client_info[client_id]
+                param_idx = client_data["param_names"].index(param_name)
+                param_value = client_data["parameters"][param_idx]
+                normalized_weight = client_weights_info[client_id]
+                
+                param_values.append(param_value)
+                normalized_weights.append(normalized_weight)
+            
+            # Verify weights for this parameter sum to approximately 1.0
+            param_weight_sum = sum(normalized_weights)
+            if abs(param_weight_sum - 1.0) > 1e-6:
+                print(f"[Server] WARNING: Weights for {param_name} sum to {param_weight_sum:.6f}, not 1.0")
+            
+            # Perform weighted FedAvg: θ_global = Σ(w_i * θ_i)
+            aggregated_param = None
+            for param_value, weight in zip(param_values, normalized_weights):
+                weighted_contribution = weight * param_value
+                if aggregated_param is None:
+                    aggregated_param = weighted_contribution.clone() if hasattr(weighted_contribution, 'clone') else weighted_contribution
+                else:
+                    aggregated_param += weighted_contribution
+            
+            aggregated_params[param_name] = aggregated_param
+            
+            # Count parameter types
+            if compat_info.get("is_batchnorm_learnable", False):
+                batchnorm_aggregated += 1
+            else:
+                regular_aggregated += 1
+        
+        # Log aggregation summary
+        print(f"[Server] ===== FEDAVG AGGREGATION SUMMARY =====")
+        print(f"[Server] Total parameters aggregated: {len(aggregated_params)}")
+        print(f"[Server] BatchNorm learnable parameters: {batchnorm_aggregated}")
+        print(f"[Server] Regular backbone parameters: {regular_aggregated}")
+        print(f"[Server] Clients participating: {total_clients}")
+        
+        # Log sample aggregated parameters
+        sample_params = list(aggregated_params.keys())[:3]
+        for param_name in sample_params:
+            shape = compatible_params[param_name]["shape"]
+            is_bn = compatible_params[param_name].get("is_batchnorm_learnable", False)
+            bn_flag = " (BatchNorm)" if is_bn else ""
+            print(f"[Server] Aggregated: {param_name} -> {shape}{bn_flag}")
+        
+        return aggregated_params
+
+    def _intelligent_fallback_aggregation(self, client_info: Dict, compatible_params: Dict) -> Tuple[NDArrays, Dict]:
+        """
+        Intelligent fallback strategy when insufficient common parameters are found.
+        Implements multiple fallback approaches based on the compatibility level.
+        """
+        if not client_info:
+            print("[Server] ERROR: No client info available for fallback aggregation")
+            return [], {"aggregation_method": "error_no_clients"}
+        
+        # Calculate compatibility ratio
+        all_param_names = [info["param_names"] for info in client_info.values()]
+        total_unique_params = len(set().union(*all_param_names)) if all_param_names else 0
+        common_param_ratio = len(compatible_params) / max(total_unique_params, 1)
+        
+        print(f"[Server] Insufficient common parameters ({len(compatible_params)}/{total_unique_params}, ratio: {common_param_ratio:.2f})")
+        print(f"[Server] Applying intelligent fallback aggregation strategy...")
+        
+        if common_param_ratio >= 0.1 and compatible_params:  # At least 10% common parameters
+            print("[Server] PARTIAL AGGREGATION: Aggregating available common parameters")
+            
+            # Aggregate what we can
+            aggregated_params = self._asymmetric_weighted_average(client_info, compatible_params)
+            
+            # Select the most representative client as the base
+            best_client_id = max(client_info.keys(), key=lambda cid: client_info[cid]["weight"])
+            best_client_info = client_info[best_client_id]
+            
+            print(f"[Server] Using client {best_client_id} as base (weight: {best_client_info['weight']})")
+            
+            # Create a hybrid parameter set: aggregated common + best client's unique
+            final_params = []
+            
+            for i, param_name in enumerate(best_client_info["param_names"]):
+                if param_name in aggregated_params:
+                    final_params.append(aggregated_params[param_name])
+                else:
+                    final_params.append(best_client_info["parameters"][i])
+            
+            summary = {
+                "aggregation_method": "partial_aggregation",
+                "common_parameters_aggregated": len(aggregated_params),
+                "unique_parameters_from_best": len(final_params) - len(aggregated_params),
+                "fallback_client": best_client_id,
+                "compatibility_ratio": common_param_ratio
+            }
+            
+            return final_params, summary
+            
+        # Very low compatibility - use weighted client selection
+        print("[Server] CLIENT SELECTION FALLBACK: Using best-performing client's parameters")
+        
+        # Select client based on performance or weight
+        best_client_id = max(client_info.keys(), key=lambda cid: client_info[cid]["weight"])
+        best_client_info = client_info[best_client_id]
+        
+        print(f"[Server] Selected client {best_client_id} (weight: {best_client_info['weight']}, arch: {best_client_info.get('architecture_signature', 'unknown')})")
+        
+        summary = {
+            "aggregation_method": "client_selection_fallback",
+            "selected_client": best_client_id,
+            "selected_client_weight": best_client_info["weight"],
+            "selected_client_arch": best_client_info.get("architecture_signature", "unknown"),
+            "compatibility_ratio": common_param_ratio,
+            "total_parameters": len(best_client_info["parameters"])
+        }
+        
+        return best_client_info["parameters"], summary
+
+    def _distribute_parameters_to_clients(self, aggregated_params: Dict, client_info: Dict) -> Dict:
+        """
+        Return aggregated parameters to each client based on their architecture.
+        Each client gets back only the parameters they can use.
+        Returns: {client_id: [param_list_in_client_order]}
+        """
+        client_distributions = {}
+        
+        for client_id, client_data in client_info.items():
+            client_params = []
+            
+            # For each parameter this client expects (in their original order)
+            for param_name in client_data["param_names"]:
+                if param_name in aggregated_params:
+                    # Give them the aggregated version
+                    client_params.append(aggregated_params[param_name])
+                else:
+                    # Keep their original parameter (not aggregated)
+                    param_idx = client_data["param_names"].index(param_name)
+                    client_params.append(client_data["parameters"][param_idx])
+            
+            client_distributions[client_id] = client_params
+            print(f"[Server] Client {client_id}: prepared {len(client_params)} parameters ({len([p for p in client_data['param_names'] if p in aggregated_params])} aggregated, {len(client_params) - len([p for p in client_data['param_names'] if p in aggregated_params])} original)")
+        
+        return client_distributions
+
     def _weighted_average(self, params_and_weights: List[Tuple[NDArrays, float]]) -> NDArrays:
         """Perform simple weighted average of backbone parameters"""
         if not params_and_weights:
@@ -405,34 +980,106 @@ class ModalityAwareFederatedStrategy(FedAvg):
         return self._backbone_weighted_average(params_and_weights)
     
     def _backbone_weighted_average(self, params_and_weights: List[Tuple[NDArrays, float]]) -> NDArrays:
-        """Perform simple weighted average of backbone parameters (excludes first/last layers)"""
+        """
+        Safe fallback aggregation that avoids shape mismatch errors.
+        Returns parameters from the client with highest weight when shapes don't match.
+        """
         print(f"[Server] Performing backbone aggregation for {len(params_and_weights)} clients")
         
         if not params_and_weights:
             return []
         
-        # Calculate total weight
-        total_weight = sum(weight for _, weight in params_and_weights)
-        if total_weight == 0:
-            total_weight = len(params_and_weights)  # Equal weighting fallback
+        # If only one client, return their parameters
+        if len(params_and_weights) == 1:
+            params, _ = params_and_weights[0]
+            print(f"[Server] Single client aggregation - returning {len(params)} parameters")
+            return params
         
-        # Initialize aggregated parameters
+        print(f"[Server] Multi-client aggregation - checking parameter compatibility")
+        
+        # Check if all clients have the same number of parameters
+        param_counts = [len(params) for params, _ in params_and_weights]
+        if len(set(param_counts)) > 1:
+            print(f"[Server] WARNING: Clients have different parameter counts: {param_counts}")
+            print(f"[Server] This indicates incompatible architectures - using highest weight client")
+            
+            # Return parameters from client with highest weight
+            best_client_idx = max(range(len(params_and_weights)), key=lambda i: params_and_weights[i][1])
+            best_params, best_weight = params_and_weights[best_client_idx]
+            print(f"[Server] Using parameters from client with weight {best_weight} ({len(best_params)} parameters)")
+            return best_params
+        
+        # All clients have same number of parameters - check overall compatibility first
+        first_params, first_weight = params_and_weights[0]
+        
+        # Pre-check: verify if architectures are actually compatible by comparing all shapes at once
+        all_shapes_compatible = True
+        incompatible_layers = []
+        
+        for i in range(len(first_params)):
+            shapes = []
+            for params, _ in params_and_weights:
+                if i < len(params) and hasattr(params[i], 'shape'):
+                    shapes.append(params[i].shape)
+            
+            if len(set(tuple(shape) for shape in shapes)) > 1:
+                all_shapes_compatible = False
+                incompatible_layers.append((i, shapes))
+        
+        # If we have many incompatible layers, the architectures are fundamentally different
+        incompatible_ratio = len(incompatible_layers) / len(first_params)
+        
+        if not all_shapes_compatible and incompatible_ratio > 0.3:  # More than 30% incompatible
+            print(f"[Server] WARNING: {incompatible_ratio:.1%} of layers have incompatible shapes")
+            print(f"[Server] Architectures are fundamentally different - using highest weight client")
+            print(f"[Server] Sample incompatible shapes: {incompatible_layers[:3]}")  # Show first 3 examples
+            
+            # Return parameters from client with highest weight
+            best_client_idx = max(range(len(params_and_weights)), key=lambda i: params_and_weights[i][1])
+            best_params, best_weight = params_and_weights[best_client_idx]
+            print(f"[Server] Using parameters from client with weight {best_weight}")
+            return best_params
+        
+        # Proceed with layer-by-layer aggregation for minor incompatibilities
+        print(f"[Server] Performing layer-by-layer aggregation ({len(incompatible_layers)} incompatible layers)")
         aggregated_params = []
-        num_params = len(params_and_weights[0][0])
         
-        print(f"[Server] Aggregating {num_params} backbone parameters from {len(params_and_weights)} clients")
-        
-        for i in range(num_params):
-            # Aggregate i-th parameter across all clients
-            weighted_sum = None
+        for i in range(len(first_params)):
+            # Check if all parameters at this index have compatible shapes
+            shapes = []
+            param_values = []
+            weights = []
+            
             for params, weight in params_and_weights:
-                if weighted_sum is None:
-                    weighted_sum = (weight / total_weight) * params[i]
-                else:
-                    weighted_sum += (weight / total_weight) * params[i]
-            aggregated_params.append(weighted_sum)
+                if i < len(params) and hasattr(params[i], 'shape'):
+                    shapes.append(params[i].shape)
+                    param_values.append(params[i])
+                    weights.append(weight)
+            
+            # Only aggregate if all shapes are identical
+            unique_shapes = set(tuple(shape) for shape in shapes)
+            if len(unique_shapes) == 1:
+                # Safe to aggregate - all shapes match
+                total_weight = sum(weights)
+                if total_weight == 0:
+                    total_weight = len(weights)
+                
+                weighted_sum = None
+                for param_value, weight in zip(param_values, weights):
+                    contribution = (weight / total_weight) * param_value
+                    if weighted_sum is None:
+                        weighted_sum = contribution
+                    else:
+                        weighted_sum += contribution
+                
+                aggregated_params.append(weighted_sum)
+            else:
+                # Shape mismatch - use parameter from client with highest weight
+                print(f"[Server] Shape mismatch at layer {i}: {shapes} - using highest weight client")
+                best_idx = max(range(len(weights)), key=lambda idx: weights[idx])
+                aggregated_params.append(param_values[best_idx])
         
-        print(f"[Server] Backbone aggregation completed - aggregated {len(aggregated_params)} parameters")
+        print(f"[Server] Safe aggregation completed - aggregated {len(aggregated_params)} parameters")
         return aggregated_params
 
     def configure_fit(self, server_round: int, parameters, client_manager):

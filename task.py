@@ -32,10 +32,14 @@ if 'TORCH_LOGS' in os.environ:
 import torch
 import numpy as np
 import json
+from pathlib import Path
 
 # nnU-Net v2: Update path if needed
 # Prefer the installed nnunetv2 package
 from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
+
+# Import wandb integration
+from wandb_integration import get_wandb_logger
 
 class FedNnUNetTrainer(nnUNetTrainer):
     """
@@ -51,6 +55,7 @@ class FedNnUNetTrainer(nnUNetTrainer):
         dataset_json: dict,
         device: torch.device = torch.device("cuda:0"),
     ):
+        # Call parent constructor first
         super().__init__(
             plans=plans,
             configuration=configuration,
@@ -59,6 +64,11 @@ class FedNnUNetTrainer(nnUNetTrainer):
             device=device,
         )
         
+        # Initialize federated parameters as None - they'll be set by the factory method
+        fed_client_id = None
+        fed_dataset_name = None
+        fed_modality = None
+        
         # Initialize federated learning specific attributes
         self.max_num_epochs = 50  # Default value
         self.current_epoch = 0
@@ -66,6 +76,47 @@ class FedNnUNetTrainer(nnUNetTrainer):
         
         # Override nnUNet multiprocessing settings to avoid conflicts with Ray
         self.num_processes = 1  # Disable multiprocessing for data augmentation
+        
+        # Initialize wandb logger as None - will be set up when federated parameters are provided
+        self.wandb_logger = None
+        self.fed_client_id = fed_client_id
+        self.fed_dataset_name = fed_dataset_name
+        self.fed_modality = fed_modality
+        
+    def setup_wandb_logging(self, client_id=None, dataset_name=None, modality=None):
+        """Setup wandb logging with federated learning context."""
+        # Update federated parameters if provided
+        if client_id is not None:
+            self.fed_client_id = client_id
+        if dataset_name is not None:
+            self.fed_dataset_name = dataset_name
+        if modality is not None:
+            self.fed_modality = modality
+            
+        # Initialize wandb logging
+        self.wandb_logger = get_wandb_logger(
+            run_type="client",
+            client_id=self.fed_client_id,
+            dataset_name=self.fed_dataset_name,
+            modality=self.fed_modality,
+            project_suffix="training"
+        )
+        
+        # Log trainer configuration
+        if self.wandb_logger.enabled:
+            config_dict = {
+                "trainer/configuration": getattr(self, 'configuration_name', 'unknown'),
+                "trainer/fold": getattr(self, 'fold', 0),
+                "trainer/max_epochs": self.max_num_epochs,
+                "trainer/device": str(getattr(self, 'device', 'unknown')),
+                "trainer/dataset_name": self.fed_dataset_name,
+                "trainer/modality": self.fed_modality
+            }
+            if hasattr(self, 'dataset_json') and self.dataset_json and "name" in self.dataset_json:
+                config_dict["dataset/name"] = self.dataset_json["name"]
+            if hasattr(self, 'dataset_json') and self.dataset_json and "numTraining" in self.dataset_json:
+                config_dict["dataset/num_training"] = self.dataset_json["numTraining"]
+            self.wandb_logger.log_metrics(config_dict)
 
     @property
     def loss_function(self):
@@ -351,6 +402,16 @@ class FedNnUNetTrainer(nnUNetTrainer):
             print(f"[Trainer] Network has {sum(p.numel() for p in self.network.parameters())} parameters")
             print(f"[Trainer] Network on device: {next(self.network.parameters()).device}")
             
+            # Log round start to wandb
+            if self.wandb_logger and self.wandb_logger.enabled:
+                self.wandb_logger.log_metrics({
+                    "training/round_start_epoch": start_epoch,
+                    "training/target_epoch": target_epoch,
+                    "training/num_local_epochs": num_local_epochs,
+                    "training/network_parameters": sum(p.numel() for p in self.network.parameters()),
+                    "training/learning_rate": self.optimizer.param_groups[0]['lr'] if hasattr(self, 'optimizer') and self.optimizer else 0.0
+                }, step=start_epoch)
+            
             # Record initial parameters for comparison
             initial_params = {name: param.clone().detach() for name, param in self.network.named_parameters()}
             
@@ -370,6 +431,15 @@ class FedNnUNetTrainer(nnUNetTrainer):
                 
                 print(f"[Trainer] Completed epoch {self.current_epoch}: loss={epoch_loss:.4f}")
                 
+                # Log epoch metrics to wandb
+                if self.wandb_logger and self.wandb_logger.enabled:
+                    metrics = {
+                        "training/epoch_loss": epoch_loss,
+                        "training/epoch": self.current_epoch,
+                        "training/learning_rate": self.optimizer.param_groups[0]['lr'] if hasattr(self, 'optimizer') and self.optimizer else 0.0
+                    }
+                    self.wandb_logger.log_metrics(metrics, step=self.current_epoch)
+                
                 # Update learning rate if using scheduler
                 if hasattr(self, 'lr_scheduler') and self.lr_scheduler is not None:
                     self.lr_scheduler.step()
@@ -388,6 +458,16 @@ class FedNnUNetTrainer(nnUNetTrainer):
             print(f"[Trainer] - Average loss: {np.mean(epoch_losses):.4f}")
             print(f"[Trainer] - Total parameter change: {total_change:.6f}")
             print(f"[Trainer] - Current total epochs: {self.current_epoch}")
+            
+            # Log round completion metrics to wandb
+            if self.wandb_logger and self.wandb_logger.enabled:
+                round_metrics = {
+                    "training/round_completed_epochs": len(epoch_losses),
+                    "training/round_avg_loss": np.mean(epoch_losses),
+                    "training/round_total_param_change": total_change,
+                    "training/cumulative_epochs": self.current_epoch
+                }
+                self.wandb_logger.log_metrics(round_metrics, step=self.current_epoch)
             
             if total_change < 1e-8:
                 print("[Trainer] WARNING: Very small parameter changes detected - training may not be working properly")
@@ -432,6 +512,39 @@ class FedNnUNetTrainer(nnUNetTrainer):
                         if hasattr(loss_val, 'item'):
                             loss_val = loss_val.item()
                         print(f"[Trainer] Batch {batch_count} loss: {loss_val:.4f}")
+                        
+                        # Log batch loss to wandb (every 5th batch to avoid spamming)
+                        if self.wandb_logger and self.wandb_logger.enabled and batch_count % 5 == 0:
+                            self.wandb_logger.log_metrics({
+                                "training/batch_loss": loss_val,
+                                "training/batch_count": batch_count
+                            }, step=self.current_epoch * max_batches + batch_count)
+                        
+                        # Log medical images for first batch of first few epochs
+                        if self.wandb_logger and self.wandb_logger.enabled and batch_count == 1 and self.current_epoch <= 3:
+                            try:
+                                # Extract image data for logging
+                                if 'data' in batch_data and 'target' in batch_data:
+                                    images = batch_data['data']
+                                    targets = batch_data['target']
+                                    
+                                    # Convert to numpy if needed
+                                    if hasattr(images, 'cpu'):
+                                        images = images.cpu().numpy()
+                                    if hasattr(targets, 'cpu'):
+                                        targets = targets.cpu().numpy()
+                                    elif isinstance(targets, list) and len(targets) > 0 and hasattr(targets[0], 'cpu'):
+                                        targets = targets[0].cpu().numpy()
+                                    
+                                    self.wandb_logger.log_medical_images(
+                                        images=images,
+                                        masks=targets,
+                                        prefix=f"training_epoch_{self.current_epoch}_batch_{batch_count}",
+                                        step=self.current_epoch,
+                                        max_images=2
+                                    )
+                            except Exception as img_log_error:
+                                print(f"[Trainer] Warning: Could not log medical images: {img_log_error}")
                     
                     if batch_count >= max_batches:
                         print(f"[Trainer] Completed {max_batches} batches, ending epoch")
@@ -521,7 +634,24 @@ class FedNnUNetTrainer(nnUNetTrainer):
         new_sd = {}
         for k, arr in weights.items():
             new_sd[k] = torch.tensor(arr, device=self.device)
-        self.network.load_state_dict(new_sd, strict=True)
+        
+        # Use strict=False to allow loading parameters into heterogeneous architectures
+        # This enables federated learning across clients with different input/output layers
+        missing_keys, unexpected_keys = self.network.load_state_dict(new_sd, strict=False)
+        
+        # Log any issues for debugging
+        if missing_keys:
+            print(f"[Trainer] Missing keys during parameter loading: {len(missing_keys)} keys")
+            # Uncomment for detailed debugging:
+            # print(f"[Trainer] Missing keys: {missing_keys[:5]}{'...' if len(missing_keys) > 5 else ''}")
+        
+        if unexpected_keys:
+            print(f"[Trainer] Unexpected keys during parameter loading: {len(unexpected_keys)} keys")
+            # Uncomment for detailed debugging:
+            # print(f"[Trainer] Unexpected keys: {unexpected_keys[:5]}{'...' if len(unexpected_keys) > 5 else ''}")
+        
+        if not missing_keys and not unexpected_keys:
+            print(f"[Trainer] Successfully loaded all {len(new_sd)} parameters without issues")
 
     def compute_dice_score(self, pred_seg: torch.Tensor, gt_seg: torch.Tensor, labels: list) -> dict:
         """
@@ -596,6 +726,31 @@ class FedNnUNetTrainer(nnUNetTrainer):
                     val_outputs.append(val_result)
                     batch_count += 1
                     
+                    # Log validation images for first batch
+                    if self.wandb_logger and self.wandb_logger.enabled and batch_count == 1:
+                        try:
+                            if 'data' in batch_data and 'target' in batch_data:
+                                images = batch_data['data']
+                                targets = batch_data['target']
+                                
+                                # Convert to numpy if needed
+                                if hasattr(images, 'cpu'):
+                                    images = images.cpu().numpy()
+                                if hasattr(targets, 'cpu'):
+                                    targets = targets.cpu().numpy()
+                                elif isinstance(targets, list) and len(targets) > 0 and hasattr(targets[0], 'cpu'):
+                                    targets = targets[0].cpu().numpy()
+                                
+                                self.wandb_logger.log_medical_images(
+                                    images=images,
+                                    masks=targets,
+                                    prefix=f"validation_epoch_{self.current_epoch}",
+                                    step=self.current_epoch,
+                                    max_images=2
+                                )
+                        except Exception as img_log_error:
+                            print(f"[Trainer] Warning: Could not log validation images: {img_log_error}")
+                    
                     if batch_count >= max_val_batches:
                         print(f"[Trainer] Processed {max_val_batches} validation batches")
                         break
@@ -637,6 +792,18 @@ class FedNnUNetTrainer(nnUNetTrainer):
                                 "num_batches": batch_count
                             }
                             
+                            # Log validation metrics to wandb
+                            if self.wandb_logger and self.wandb_logger.enabled:
+                                val_metrics = {
+                                    "validation/mean_dice": mean_fg_dice,
+                                    "validation/num_batches": batch_count
+                                }
+                                # Log per-class dice scores
+                                for label, dice_val in per_label_dict.items():
+                                    val_metrics[f"validation/dice_class_{label}"] = dice_val
+                                
+                                self.wandb_logger.log_metrics(val_metrics, step=self.current_epoch)
+                            
                             print(f"[Trainer] Online validation complete: mean Dice = {mean_fg_dice:.4f} ({batch_count} batches)")
                             return validation_results
                     
@@ -661,6 +828,17 @@ class FedNnUNetTrainer(nnUNetTrainer):
                         "mean": float(mean_fg_dice),
                         "num_batches": batch_count
                     }
+                    
+                    # Log validation metrics to wandb (fallback case)
+                    if self.wandb_logger and self.wandb_logger.enabled:
+                        val_metrics = {
+                            "validation/mean_dice": mean_fg_dice,
+                            "validation/num_batches": batch_count
+                        }
+                        for label, dice_val in per_label_dict.items():
+                            val_metrics[f"validation/dice_class_{label}"] = dice_val
+                        
+                        self.wandb_logger.log_metrics(val_metrics, step=self.current_epoch)
                     
                     print(f"[Trainer] Online validation complete: mean Dice = {mean_fg_dice:.4f} ({batch_count} batches)")
                     return validation_results
