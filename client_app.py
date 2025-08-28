@@ -733,17 +733,22 @@ class NnUNet3DFullresClient(NumPyClient):
             # Use stored param_names if not provided
             if param_names is None:
                 param_names = getattr(self, 'param_names', [])
-            
+
+            total_pairs = min(len(backbone_parameters), len(param_names))
             if len(backbone_parameters) != len(param_names):
-                print(f"[Client {self.client_id}] Parameter count mismatch: {len(backbone_parameters)} values vs {len(param_names)} names")
-                return
-            
-            print(f"[Client {self.client_id}] Loading {len(backbone_parameters)} backbone parameters from server")
-            
+                print(
+                    f"[Client {self.client_id}] Parameter count mismatch: {len(backbone_parameters)} values vs {len(param_names)} names"
+                )
+                print(
+                    f"[Client {self.client_id}] Loading only {total_pairs} matched parameters"
+                )
+
+            print(f"[Client {self.client_id}] Loading {total_pairs} backbone parameters from server")
+
             loaded_count = 0
             skipped_count = 0
             shape_mismatch_count = 0
-            
+
             for param_name, param_value in zip(param_names, backbone_parameters):
                 if param_name in current_weights:
                     if hasattr(param_value, 'shape') and hasattr(current_weights[param_name], 'shape'):
@@ -774,7 +779,7 @@ class NnUNet3DFullresClient(NumPyClient):
             print(f"[Client {self.client_id}]   Successfully loaded: {loaded_count} parameters")
             print(f"[Client {self.client_id}]   Skipped (not found locally): {skipped_count} parameters")
             print(f"[Client {self.client_id}]   Skipped (shape mismatch): {shape_mismatch_count} parameters")
-            print(f"[Client {self.client_id}]   Total parameters attempted: {len(backbone_parameters)}")
+            print(f"[Client {self.client_id}]   Total parameters attempted: {total_pairs}")
             
             if loaded_count == 0:
                 print(f"[Client {self.client_id}] WARNING: No parameters were loaded! Check parameter compatibility.")
@@ -943,6 +948,16 @@ class NnUNet3DFullresClient(NumPyClient):
         Implements new backbone aggregation strategy with warmup logic.
         """
         federated_round = config.get("server_round", 1)
+
+        # Update parameter name list from server configuration if provided
+        param_names_str = config.get("param_names_str")
+        if param_names_str:
+            try:
+                self.param_names = json.loads(param_names_str)
+            except json.JSONDecodeError as e:
+                print(
+                    f"[Client {self.client_id}] Warning: Could not decode param_names_str: {e}"
+                )
         
         # Handle preprocessing round (federated_round = -2) - share fingerprint only
         if federated_round == -2:
