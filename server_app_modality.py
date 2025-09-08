@@ -446,6 +446,7 @@ class ModalityAwareFederatedStrategy(FedAvg):
     def _extract_client_parameter_info(self, results: List[Tuple[ClientProxy, FitRes]]) -> Dict:
         """
         Extract parameter metadata from client metrics following FednnUNet approach.
+        Parameter shapes are derived from received parameters to ensure consistency.
         Returns: {client_id: {"param_names": [], "param_shapes": [], "parameters": [], "weight": float, "architecture_signature": str}}
         """
         client_info = {}
@@ -459,26 +460,12 @@ class ModalityAwareFederatedStrategy(FedAvg):
                 param_names = json.loads(param_names_str) if param_names_str else []
             except json.JSONDecodeError:
                 param_names = fit_res.metrics.get("param_names", [])  # Fallback
-            param_shapes_str = fit_res.metrics.get("param_shapes_str", "[]")
-            try:
-                param_shapes = json.loads(param_shapes_str) if param_shapes_str else []
-            except json.JSONDecodeError:
-                param_shapes = fit_res.metrics.get("param_shapes", [])  # Fallback
-            num_params = fit_res.metrics.get("num_params", 0)
             architecture_signature = fit_res.metrics.get("architecture_signature", "unknown")
-            
-            # Convert Flower parameters to NDArrays
+
+            # Convert Flower parameters to NDArrays and derive shapes
             parameters = parameters_to_ndarrays(fit_res.parameters)
-            
-            # Basic validation
-            if len(parameters) != len(param_names):
-                print(f"[Server] Client {client_id}: parameter count mismatch - {len(parameters)} parameters vs {len(param_names)} names")
-                continue
-                
-            if len(parameters) != len(param_shapes):
-                print(f"[Server] Client {client_id}: shape count mismatch - {len(parameters)} parameters vs {len(param_shapes)} shapes")
-                continue
-            
+            param_shapes = [list(p.shape) for p in parameters]
+
             client_info[client_id] = {
                 "param_names": param_names,
                 "param_shapes": param_shapes,
