@@ -717,33 +717,25 @@ class NnUNet3DFullresClient(NumPyClient):
         
         print(f"[Client {self.client_id}] ============================================\n")
 
-    def _load_backbone_parameters(self, backbone_parameters: list, param_names: list = None):
-        """Load backbone parameters from server with enhanced compatibility for heterogeneous architectures.
-        
-        Args:
-            backbone_parameters: List of parameter tensors from server aggregation
-            param_names: List of parameter names corresponding to the tensors
-        
-        Uses strict=False loading to handle architecture differences gracefully.
+    def _load_backbone_parameters(self, backbone_parameters: list):
+        """Load backbone parameters from the server, updating only matching pairs.
+
+        Any local parameters without a corresponding name from the server remain
+        unchanged.
         """
         try:
             current_weights = self.trainer.get_weights()
             updated_weights = current_weights.copy()
-            
-            # Use stored param_names if not provided
-            if param_names is None:
-                param_names = getattr(self, 'param_names', [])
 
-            total_pairs = min(len(backbone_parameters), len(param_names))
+            param_names = getattr(self, "param_names", [])
+
             if len(backbone_parameters) != len(param_names):
                 print(
-                    f"[Client {self.client_id}] Parameter count mismatch: {len(backbone_parameters)} values vs {len(param_names)} names"
-                )
-                print(
-                    f"[Client {self.client_id}] Loading only {total_pairs} matched parameters"
+                    f"[Client {self.client_id}] Warning: received {len(backbone_parameters)} parameters for {len(param_names)} names"
                 )
 
-            print(f"[Client {self.client_id}] Loading {total_pairs} backbone parameters from server")
+            attempted = min(len(backbone_parameters), len(param_names))
+            print(f"[Client {self.client_id}] Loading {attempted} backbone parameters from server")
 
             loaded_count = 0
             skipped_count = 0
@@ -751,46 +743,75 @@ class NnUNet3DFullresClient(NumPyClient):
 
             for param_name, param_value in zip(param_names, backbone_parameters):
                 if param_name in current_weights:
-                    if hasattr(param_value, 'shape') and hasattr(current_weights[param_name], 'shape'):
+                    if hasattr(param_value, "shape") and hasattr(current_weights[param_name], "shape"):
                         if param_value.shape == current_weights[param_name].shape:
                             updated_weights[param_name] = param_value
                             loaded_count += 1
                         else:
-                            print(f"[Client {self.client_id}] Shape mismatch for {param_name}: server {param_value.shape} vs local {current_weights[param_name].shape}")
+                            print(
+                                f"[Client {self.client_id}] Shape mismatch for {param_name}: server {param_value.shape} vs local {current_weights[param_name].shape}"
+                            )
                             shape_mismatch_count += 1
                     else:
                         updated_weights[param_name] = param_value
                         loaded_count += 1
                 else:
-                    print(f"[Client {self.client_id}] Parameter {param_name} not found in local model, skipping")
+                    print(
+                        f"[Client {self.client_id}] Parameter {param_name} not found in local model, skipping"
+                    )
                     skipped_count += 1
-            
-            # Load parameters with enhanced error handling
+
             try:
                 self.trainer.set_weights(updated_weights)
-                print(f"[Client {self.client_id}] Successfully loaded parameters into model with strict=False")
+                print(
+                    f"[Client {self.client_id}] Successfully loaded parameters into model with strict=False"
+                )
             except Exception as set_weights_error:
-                print(f"[Client {self.client_id}] Warning: Error in set_weights: {set_weights_error}")
-                print(f"[Client {self.client_id}] This may be due to remaining architecture mismatches")
-                print(f"[Client {self.client_id}] Continuing with current local parameters")
+                print(
+                    f"[Client {self.client_id}] Warning: Error in set_weights: {set_weights_error}"
+                )
+                print(
+                    f"[Client {self.client_id}] This may be due to remaining architecture mismatches"
+                )
+                print(
+                    f"[Client {self.client_id}] Continuing with current local parameters"
+                )
                 return
-            
+
             print(f"[Client {self.client_id}] ===== PARAMETER LOADING SUMMARY =====")
-            print(f"[Client {self.client_id}]   Successfully loaded: {loaded_count} parameters")
-            print(f"[Client {self.client_id}]   Skipped (not found locally): {skipped_count} parameters")
-            print(f"[Client {self.client_id}]   Skipped (shape mismatch): {shape_mismatch_count} parameters")
-            print(f"[Client {self.client_id}]   Total parameters attempted: {total_pairs}")
-            
+            print(
+                f"[Client {self.client_id}]   Successfully loaded: {loaded_count} parameters"
+            )
+            print(
+                f"[Client {self.client_id}]   Skipped (not found locally): {skipped_count} parameters"
+            )
+            print(
+                f"[Client {self.client_id}]   Skipped (shape mismatch): {shape_mismatch_count} parameters"
+            )
+            print(
+                f"[Client {self.client_id}]   Total parameters attempted: {attempted}"
+            )
+
             if loaded_count == 0:
-                print(f"[Client {self.client_id}] WARNING: No parameters were loaded! Check parameter compatibility.")
+                print(
+                    f"[Client {self.client_id}] WARNING: No parameters were loaded! Check parameter compatibility."
+                )
             elif shape_mismatch_count > 0 or skipped_count > 0:
-                print(f"[Client {self.client_id}] INFO: Some parameters skipped - this is normal for heterogeneous architectures")
-            
+                print(
+                    f"[Client {self.client_id}] INFO: Some parameters skipped - this is normal for heterogeneous architectures"
+                )
+
         except Exception as e:
-            print(f"[Client {self.client_id}] ERROR: Exception during backbone parameter loading: {e}")
-            print(f"[Client {self.client_id}] Keeping current local parameters as fallback")
+            print(
+                f"[Client {self.client_id}] ERROR: Exception during backbone parameter loading: {e}"
+            )
+            print(
+                f"[Client {self.client_id}] Keeping current local parameters as fallback"
+            )
             import traceback
-            print(f"[Client {self.client_id}] Traceback: {traceback.format_exc()}")
+            print(
+                f"[Client {self.client_id}] Traceback: {traceback.format_exc()}"
+            )
 
     
     
@@ -947,8 +968,6 @@ class NnUNet3DFullresClient(NumPyClient):
         Receive global backbone params, do local training, return updated params + metrics.
         Implements new backbone aggregation strategy with warmup logic.
         """
-        federated_round = config.get("server_round", 1)
-
         # Update parameter name list from server configuration if provided
         param_names_str = config.get("param_names_str")
         if param_names_str:
@@ -958,6 +977,8 @@ class NnUNet3DFullresClient(NumPyClient):
                 print(
                     f"[Client {self.client_id}] Warning: Could not decode param_names_str: {e}"
                 )
+
+        federated_round = config.get("server_round", 1)
         
         # Handle preprocessing round (federated_round = -2) - share fingerprint only
         if federated_round == -2:
