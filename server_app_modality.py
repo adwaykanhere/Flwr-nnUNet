@@ -1254,16 +1254,25 @@ class ModalityAwareFederatedStrategy(FedAvg):
             else:
                 # Traditional FedAvg aggregation
                 print(f"[Server] Performing traditional FedAvg aggregation (enable_modality_aggregation={self.enable_modality_aggregation})...")
-                aggregated_result = super().aggregate_fit(server_round, results, failures)
-                global_summary = {'aggregation_method': 'traditional_fedavg'}
+                client_info = self._extract_client_parameter_info(results)
+                compatible_params = self._find_common_layers(client_info)
 
-                # Update last_common_param_names from client metadata if available
-                if results:
-                    param_names_str = results[0][1].metrics.get("param_names_str", "[]")
-                    try:
-                        self.last_common_param_names = json.loads(param_names_str) if param_names_str else []
-                    except json.JSONDecodeError:
-                        self.last_common_param_names = []
+                if compatible_params:
+                    aggregated_dict = self._asymmetric_weighted_average(client_info, compatible_params)
+                    aggregated_names = sorted(compatible_params.keys())
+                    aggregated_params = [aggregated_dict[name] for name in aggregated_names]
+                    self.last_common_param_names = aggregated_names
+                    aggregated_result = (ndarrays_to_parameters(aggregated_params), {"aggregation_method": "traditional_fedavg"})
+                    global_summary = {"aggregation_method": "traditional_fedavg"}
+                else:
+                    fallback_params, fallback_summary = self._intelligent_fallback_aggregation(client_info, compatible_params)
+                    self.last_common_param_names = []
+                    if fallback_params:
+                        aggregated_result = (ndarrays_to_parameters(fallback_params), fallback_summary)
+                        global_summary = fallback_summary
+                    else:
+                        aggregated_result = None
+                        global_summary = fallback_summary
                 
             # Save global model if validation improved
             if client_validation_scores and aggregated_result is not None:
