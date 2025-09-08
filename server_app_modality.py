@@ -188,7 +188,7 @@ class ModalityAwareFederatedStrategy(FedAvg):
                 if compatible_params and len(compatible_params) > 0:
                     print(f"[Server] Modality {modality}: aggregating {len(compatible_params)} common parameters")
                     aggregated_param_dict = self._asymmetric_weighted_average(client_info, compatible_params)
-                    common_param_names = sorted(compatible_params.keys())
+                    common_param_names = sorted(aggregated_param_dict.keys())
                     aggregated_params = [aggregated_param_dict[name] for name in common_param_names]
                     self.last_common_param_names = common_param_names
                 else:
@@ -260,7 +260,7 @@ class ModalityAwareFederatedStrategy(FedAvg):
                 if compatible_params and len(compatible_params) > 0:
                     print(f"[Server] Dataset-modality {signature}: aggregating {len(compatible_params)} common parameters")
                     aggregated_param_dict = self._asymmetric_weighted_average(client_info, compatible_params)
-                    common_param_names = sorted(compatible_params.keys())
+                    common_param_names = sorted(aggregated_param_dict.keys())
                     aggregated_params = [aggregated_param_dict[name] for name in common_param_names]
                     self.last_common_param_names = common_param_names
                 else:
@@ -818,26 +818,33 @@ class ModalityAwareFederatedStrategy(FedAvg):
         aggregated_params = {}
         batchnorm_aggregated = 0
         regular_aggregated = 0
-        
+
         for param_name, compat_info in compatible_params.items():
-            # Collect parameter values and normalized weights
+            # Collect parameter values, shapes, and normalized weights
             param_values = []
             normalized_weights = []
-            
+            param_shapes = []
+
             for client_id in compat_info["clients"]:
                 client_data = client_info[client_id]
                 param_idx = client_data["param_names"].index(param_name)
                 param_value = client_data["parameters"][param_idx]
                 normalized_weight = client_weights_info[client_id]
-                
+
                 param_values.append(param_value)
                 normalized_weights.append(normalized_weight)
-            
+                param_shapes.append(tuple(getattr(param_value, "shape", np.shape(param_value))))
+
+            # Verify shapes are identical across clients
+            if len(set(param_shapes)) > 1:
+                print(f"[Server] WARNING: Shape mismatch for {param_name}: {param_shapes}, skipping aggregation")
+                continue
+
             # Verify weights for this parameter sum to approximately 1.0
             param_weight_sum = sum(normalized_weights)
             if abs(param_weight_sum - 1.0) > 1e-6:
                 print(f"[Server] WARNING: Weights for {param_name} sum to {param_weight_sum:.6f}, not 1.0")
-            
+
             # Perform weighted FedAvg: θ_global = Σ(w_i * θ_i)
             aggregated_param = None
             for param_value, weight in zip(param_values, normalized_weights):
@@ -846,9 +853,9 @@ class ModalityAwareFederatedStrategy(FedAvg):
                     aggregated_param = weighted_contribution.clone() if hasattr(weighted_contribution, 'clone') else weighted_contribution
                 else:
                     aggregated_param += weighted_contribution
-            
+
             aggregated_params[param_name] = aggregated_param
-            
+
             # Count parameter types
             if compat_info.get("is_batchnorm_learnable", False):
                 batchnorm_aggregated += 1
@@ -871,8 +878,7 @@ class ModalityAwareFederatedStrategy(FedAvg):
             print(f"[Server] Aggregated: {param_name} -> {shape}{bn_flag}")
 
         # Update last_common_param_names with aggregated parameter names
-        existing = set(getattr(self, "last_common_param_names", []))
-        self.last_common_param_names = list(existing.union(aggregated_params.keys()))
+        self.last_common_param_names = list(aggregated_params.keys())
 
         return aggregated_params
 
