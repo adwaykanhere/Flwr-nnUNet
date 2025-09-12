@@ -9,7 +9,7 @@ set -euo pipefail
 # =============================================================================
 # Usage:
 #   bash   setup_flwr_nnunet.sh [--name flower-nnunet] [--cuda cu126|cpu] \
-#                               [--dataset Task09_Spleen] [--no-preprocess]
+#                               [--dataset Task09_Spleen]
 #   source setup_flwr_nnunet.sh  # keep exports in your current shell
 # =============================================================================
 
