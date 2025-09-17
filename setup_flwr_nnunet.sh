@@ -95,6 +95,8 @@ if conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
   echo ">> Conda env '$ENV_NAME' already exists."
 else
   echo ">> Creating conda env: $ENV_NAME (python=3.10)"
+  conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+  conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
   "$CONDA_CREATE_BIN" create -y -n "$ENV_NAME" python=3.10
 fi
 conda activate "$ENV_NAME"
